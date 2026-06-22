@@ -140,6 +140,7 @@ export type {
 	// Events - Tool
 	ToolCallEvent,
 	ToolCallEventResult,
+	ToolCallMiddlewareResult,
 	// Tools
 	ToolDefinition,
 	// Events - Tool Execution
@@ -152,6 +153,7 @@ export type {
 	ToolRenderResultOptions,
 	ToolResultEvent,
 	ToolResultEventResult,
+	ToolResultMiddlewareResult,
 	TreePreparation,
 	TurnEndEvent,
 	TurnStartEvent,

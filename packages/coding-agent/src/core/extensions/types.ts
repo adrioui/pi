@@ -1017,10 +1017,42 @@ export interface ContextEventResult {
 
 export type BeforeProviderRequestEventResult = unknown;
 
+/**
+ * Middleware-style result that tool_call handlers can return to allow, modify,
+ * synthesize, or reject a tool call.
+ *
+ * - `{ action: "allow" }`: Continue with the original or handler-mutated args.
+ * - `{ action: "modify", args }`: Continue with modified arguments.
+ * - `{ action: "synthesize", result, isError? }`: Short-circuit execution
+ *   and return a synthetic result as if the tool had run.
+ * - `{ action: "reject", reason }`: Block execution and return an error message.
+ */
+export type ToolCallMiddlewareResult =
+	| { action: "allow" }
+	| { action: "modify"; args: Record<string, unknown> }
+	| { action: "synthesize"; result: AgentToolResult<any>; isError?: boolean }
+	| { action: "reject"; reason: string };
+
+/**
+ * Middleware-style result that tool_result handlers can return to allow, modify,
+ * or reject a tool result.
+ *
+ * - `{ action: "allow" }`: Continue with the original or handler-mutated values.
+ * - `{ action: "modify", content?, details?, isError? }`: Continue with modified result fields.
+ * - `{ action: "reject", reason }`: Replace the result with an error containing the reason.
+ */
+export type ToolResultMiddlewareResult =
+	| { action: "allow" }
+	| { action: "modify"; content?: (TextContent | ImageContent)[]; details?: unknown; isError?: boolean }
+	| { action: "reject"; reason: string };
+
 export interface ToolCallEventResult {
 	/** Block tool execution. To modify arguments, mutate `event.input` in place instead. */
 	block?: boolean;
 	reason?: string;
+	/** When set, the tool call middleware returned a synthesized result. */
+	synthesizeResult?: AgentToolResult<any>;
+	synthesizeIsError?: boolean;
 }
 
 /** Result from user_bash event handler */
@@ -1157,8 +1189,14 @@ export interface ExtensionAPI {
 	on(event: "tool_execution_end", handler: ExtensionHandler<ToolExecutionEndEvent>): void;
 	on(event: "model_select", handler: ExtensionHandler<ModelSelectEvent>): void;
 	on(event: "thinking_level_select", handler: ExtensionHandler<ThinkingLevelSelectEvent>): void;
-	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
-	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
+	on(
+		event: "tool_call",
+		handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult | ToolCallMiddlewareResult>,
+	): void;
+	on(
+		event: "tool_result",
+		handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult | ToolResultMiddlewareResult>,
+	): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 

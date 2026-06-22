@@ -3,7 +3,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Model } from "@earendil-works/pi-ai";
+import type { ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
@@ -820,19 +820,63 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const handlerResult = (await handler(currentEvent, ctx)) as ToolResultEventResult | undefined;
+					const handlerResult = await handler(currentEvent, ctx);
 					if (!handlerResult) continue;
 
-					if (handlerResult.content !== undefined) {
-						currentEvent.content = handlerResult.content;
+					// Check if this is a middleware-style result (has action property)
+					const anyResult = handlerResult as Record<string, unknown>;
+					if (typeof anyResult.action === "string") {
+						switch (anyResult.action) {
+							case "allow":
+								// Continue to next handler with current (possibly mutated) values
+								break;
+							case "modify":
+								if (anyResult.content !== undefined) {
+									currentEvent.content = anyResult.content as (TextContent | ImageContent)[];
+									modified = true;
+								}
+								if (anyResult.details !== undefined) {
+									currentEvent.details = anyResult.details;
+									modified = true;
+								}
+								if (anyResult.isError !== undefined) {
+									currentEvent.isError = !!anyResult.isError;
+									modified = true;
+								}
+								break;
+							case "reject":
+								currentEvent.isError = true;
+								currentEvent.content = [
+									{
+										type: "text" as const,
+										text:
+											typeof anyResult.reason === "string"
+												? anyResult.reason
+												: "Tool result was rejected by extension",
+									},
+								];
+								modified = true;
+								return {
+									content: currentEvent.content,
+									details: currentEvent.details,
+									isError: currentEvent.isError,
+								};
+						}
+						continue;
+					}
+
+					// Legacy ToolResultEventResult
+					const legacyResult = handlerResult as ToolResultEventResult;
+					if (legacyResult.content !== undefined) {
+						currentEvent.content = legacyResult.content;
 						modified = true;
 					}
-					if (handlerResult.details !== undefined) {
-						currentEvent.details = handlerResult.details;
+					if (legacyResult.details !== undefined) {
+						currentEvent.details = legacyResult.details;
 						modified = true;
 					}
-					if (handlerResult.isError !== undefined) {
-						currentEvent.isError = handlerResult.isError;
+					if (legacyResult.isError !== undefined) {
+						currentEvent.isError = legacyResult.isError;
 						modified = true;
 					}
 				} catch (err) {
@@ -870,11 +914,56 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				const handlerResult = await handler(event, ctx);
 
-				if (handlerResult) {
-					result = handlerResult as ToolCallEventResult;
-					if (result.block) {
-						return result;
+				if (!handlerResult) continue;
+
+				// Check if this is a middleware-style result (has action property)
+				const anyResult = handlerResult as Record<string, unknown>;
+				if (typeof anyResult.action === "string") {
+					switch (anyResult.action) {
+						case "allow":
+							// Continue to next handler with current (possibly mutated) event
+							break;
+						case "modify":
+							// Copy modified args into event.input in place so the original
+							// reference (shared with beforeToolCall's args) reflects the changes.
+							if (anyResult.args && typeof anyResult.args === "object") {
+								const modifiedArgs = anyResult.args as Record<string, unknown>;
+								const input = event.input as Record<string, unknown>;
+								// Clear existing keys
+								for (const key of Object.keys(input)) {
+									delete input[key];
+								}
+								// Copy new keys
+								for (const [key, value] of Object.entries(modifiedArgs)) {
+									input[key] = value;
+								}
+							}
+							break;
+						case "synthesize":
+							// Return immediately with synthesized result
+							return {
+								block: true,
+								reason: "synthesized",
+								synthesizeResult: (anyResult as Record<string, unknown>)
+									.result as ToolCallEventResult["synthesizeResult"],
+								synthesizeIsError: !!anyResult.isError,
+							} as ToolCallEventResult;
+						case "reject":
+							return {
+								block: true,
+								reason:
+									typeof anyResult.reason === "string"
+										? anyResult.reason
+										: "Tool call was rejected by extension",
+							} as ToolCallEventResult;
 					}
+					continue;
+				}
+
+				// Legacy ToolCallEventResult
+				result = handlerResult as ToolCallEventResult;
+				if (result.block) {
+					return result;
 				}
 			}
 		}
