@@ -595,6 +595,13 @@ async function prepareToolCall(
 					isError: true,
 				};
 			}
+			if (beforeResult?.immediateResult) {
+				return {
+					kind: "immediate",
+					result: beforeResult.immediateResult,
+					isError: beforeResult.immediateResultIsError ?? false,
+				};
+			}
 			if (beforeResult?.block) {
 				return {
 					kind: "immediate",

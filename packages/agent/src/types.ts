@@ -49,12 +49,18 @@ export type AgentToolCall = Extract<AssistantMessage["content"][number], { type:
 /**
  * Result returned from `beforeToolCall`.
  *
- * Returning `{ block: true }` prevents the tool from executing. The loop emits an error tool result instead.
- * `reason` becomes the text shown in that error result. If omitted, a default blocked message is used.
+ * - Returning `{ block: true }` prevents the tool from executing. The loop emits an error tool result instead.
+ *   `reason` becomes the text shown in that error result. If omitted, a default blocked message is used.
+ * - Returning `{ immediateResult }` provides an immediate (non-executed) tool result, bypassing execution.
+ *   Use this to short-circuit tool calls with synthetic results (e.g. from middleware).
  */
 export interface BeforeToolCallResult {
 	block?: boolean;
 	reason?: string;
+	/** An immediate tool result to return without executing the actual tool. */
+	immediateResult?: AgentToolResult<any>;
+	/** Whether the immediate result should be treated as an error. */
+	immediateResultIsError?: boolean;
 }
 
 /**
