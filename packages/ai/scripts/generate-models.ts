@@ -2066,6 +2066,38 @@ async function generateModels() {
 		});
 	}
 
+	// Sakana AI models
+	// Fugu dynamically orchestrates frontier models per-request (pass-through pricing for the underlying model).
+	// Fugu Ultra uses fixed pricing. Models require SAKANA_API_KEY env var.
+	// See https://console.sakana.ai/pricing and https://console.sakana.ai/get-started
+	const sakanaModels: Model<"openai-completions">[] = [
+		{
+			id: "fugu",
+			name: "Fugu",
+			api: "openai-completions",
+			baseUrl: "https://api.sakana.ai/v1",
+			provider: "sakana",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 128000,
+		},
+		{
+			id: "fugu-ultra",
+			name: "Fugu Ultra",
+			api: "openai-completions",
+			baseUrl: "https://api.sakana.ai/v1",
+			provider: "sakana",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+			contextWindow: 272000,
+			maxTokens: 128000,
+		},
+	];
+	allModels.push(...sakanaModels);
+
 	// Azure Foundry deploys these with larger context windows than OpenAI's own API,
 	// which caps gpt-5.4/gpt-5.5 at 272k. See models-sold-directly-by-azure docs.
 	const AZURE_CONTEXT_WINDOW_OVERRIDES: Record<string, number> = {

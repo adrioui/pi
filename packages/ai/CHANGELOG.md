@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Sakana AI provider with Fugu and Fugu Ultra models. OpenAI-compatible API at `https://api.sakana.ai/v1`, auth via `SAKANA_API_KEY` env var. ([#5929](https://github.com/earendil-works/pi/issues/5929))
+
 ## [0.79.9] - 2026-06-20
 
 ### Added
