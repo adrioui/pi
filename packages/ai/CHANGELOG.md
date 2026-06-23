@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added Qwen Cloud provider with Qwen 3.7 Plus/Max, Qwen 3.6 Plus/Max Preview, Qwen 3 Max, Qwen Plus/Max/Flash/Turbo/Long, Qwen 3 VL Plus/Flash, and QWQ 32B Preview models. OpenAI-compatible API at `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`, auth via `DASHSCOPE_API_KEY` env var.
 - Added Sakana AI provider with Fugu and Fugu Ultra models. OpenAI-compatible API at `https://api.sakana.ai/v1`, auth via `SAKANA_API_KEY` env var. ([#5929](https://github.com/earendil-works/pi/issues/5929))
 
 ## [0.79.9] - 2026-06-20
