@@ -6,6 +6,9 @@
  * subagents. This is the pi analogue of Amp's Task tool.
  */
 
+import { execSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
@@ -21,6 +24,98 @@ const TASK_SYSTEM_PROMPT = [
 	"Only your final message is returned to the calling agent, so put the complete outcome in your final message.",
 	"Follow the same coding, git, and workspace safety rules as the main agent: read before editing, keep edits surgical, never run destructive commands unless explicitly asked, and validate changes.",
 ].join("\n");
+
+/**
+ * Build a context firewall block containing project context for the subagent.
+ * This helps the subagent understand the project state without seeing the parent conversation.
+ */
+export function buildContextFirewall(cwd: string, maxRecentCommits = 10, maxAgentsFiles = 5): string | null {
+	const contextParts: string[] = [];
+
+	// Add git branch and status
+	try {
+		const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+			cwd,
+			encoding: "utf-8",
+			stdio: ["pipe", "pipe", "pipe"],
+		}).trim();
+		const status = execSync("git status --porcelain", {
+			cwd,
+			encoding: "utf-8",
+			stdio: ["pipe", "pipe", "pipe"],
+		}).trim();
+
+		contextParts.push(`<project-state>`);
+		contextParts.push(`  <branch>${branch}</branch>`);
+		if (status) {
+			const statusLines = status.split("\n").slice(0, 20);
+			contextParts.push(`  <git-status>`);
+			for (const line of statusLines) {
+				contextParts.push(`    ${line}`);
+			}
+			contextParts.push(`  </git-status>`);
+		}
+		contextParts.push(`</project-state>`);
+	} catch {
+		// Git not available or not a git repo, skip
+	}
+
+	// Add recent commits
+	try {
+		const log = execSync(`git log --oneline -n ${maxRecentCommits}`, {
+			cwd,
+			encoding: "utf-8",
+			stdio: ["pipe", "pipe", "pipe"],
+		}).trim();
+		if (log) {
+			contextParts.push(`<recent-commits>`);
+			for (const line of log.split("\n")) {
+				contextParts.push(`  ${line}`);
+			}
+			contextParts.push(`</recent-commits>`);
+		}
+	} catch {
+		// Git not available, skip
+	}
+
+	// Add AGENTS.md files from cwd and parent directories
+	const agentsFiles: Array<{ path: string; content: string }> = [];
+	let currentDir = cwd;
+	const root = join(cwd, "..");
+
+	while (currentDir !== root && agentsFiles.length < maxAgentsFiles) {
+		const agentsPath = join(currentDir, "AGENTS.md");
+		if (existsSync(agentsPath)) {
+			try {
+				const content = readFileSync(agentsPath, "utf-8");
+				const relPath = relative(cwd, agentsPath);
+				agentsFiles.push({ path: relPath || "AGENTS.md", content });
+			} catch {
+				// Skip unreadable files
+			}
+		}
+
+		const parentDir = join(currentDir, "..");
+		if (parentDir === currentDir) break;
+		currentDir = parentDir;
+	}
+
+	if (agentsFiles.length > 0) {
+		contextParts.push(`<project-guidance>`);
+		agentsFiles.forEach(({ path, content }) => {
+			contextParts.push(`  <guidance-file path="${path}">`);
+			contextParts.push(`    ${content}`);
+			contextParts.push(`  </guidance-file>`);
+		});
+		contextParts.push(`</project-guidance>`);
+	}
+
+	if (contextParts.length === 0) {
+		return null;
+	}
+
+	return `<project-context>\n${contextParts.join("\n")}\n</project-context>`;
+}
 
 /**
  * Default tools a task subagent may use when the caller does not restrict them.
@@ -113,11 +208,15 @@ export function createTaskToolDefinition(options: CreateTaskToolDefinitionOption
 					};
 				}
 
+				// Build context firewall and inject into user message
+				const contextBlock = buildContextFirewall(options.cwd);
+				const enhancedRequest = contextBlock ? `${contextBlock}\n\n${params.request}` : params.request;
+
 				const result = await runSubagent(
 					{
 						model: resolvedModel,
 						systemPrompt: TASK_SYSTEM_PROMPT,
-						userMessage: params.request,
+						userMessage: enhancedRequest,
 						allowedTools: effectiveAllowedTools,
 						tools: options.tools,
 						maxTurns,
