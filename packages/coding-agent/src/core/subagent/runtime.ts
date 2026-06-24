@@ -2,8 +2,8 @@
  * Subagent runtime - runs a subagent with its own model, tools, and error guard.
  */
 
-import type { AssistantMessage, Context, Message, Model, TextContent } from "@earendil-works/pi-ai";
-import { streamSimple } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Context, Message, Model, TextContent } from "@earendil-works/pi-ai/compat";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { ErrorRepeatGuard } from "../error-repeat-guard.ts";
 
 export interface SubagentTool {

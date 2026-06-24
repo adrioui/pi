@@ -2,7 +2,7 @@
  * Tests for the subagent runtime (runSubagent).
  */
 
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { runSubagent, type SubagentTool } from "../src/core/subagent/runtime.ts";

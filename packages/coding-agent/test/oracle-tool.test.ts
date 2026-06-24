@@ -2,7 +2,7 @@
  * Tests for the oracle tool.
  */
 
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SubagentTool } from "../src/core/subagent/runtime.ts";

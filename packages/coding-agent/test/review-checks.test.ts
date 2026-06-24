@@ -5,7 +5,7 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CHECK_BASELINE_TOOLS, loadReviewChecks, resolveCheckTools } from "../src/core/review-checks.ts";
 import { createCodeReviewToolDefinition } from "../src/core/tools/code-review.ts";
