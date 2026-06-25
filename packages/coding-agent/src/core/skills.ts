@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import ignore from "ignore";
+import { homedir } from "os";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
@@ -378,6 +379,24 @@ export interface LoadSkillsOptions {
 	skillPaths: string[];
 	/** Include default skills directories. */
 	includeDefaults: boolean;
+	/** Include Claude/Agents-compatible skill roots. */
+	includeClaudeCodeSkills?: boolean;
+}
+
+function findWorkspaceSkillRoots(cwd: string, relativeSkillDir: string): string[] {
+	const roots: string[] = [];
+	const root = resolve("/");
+	let current = resolve(cwd);
+	while (current !== root) {
+		roots.push(resolve(current, relativeSkillDir));
+		const parent = resolve(current, "..");
+		if (parent === current) {
+			break;
+		}
+		current = parent;
+	}
+	roots.push(resolve(root, relativeSkillDir));
+	return roots;
 }
 
 /**
@@ -430,6 +449,17 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	if (includeDefaults) {
 		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", true));
 		addSkills(loadSkillsFromDirInternal(resolve(resolvedCwd, CONFIG_DIR_NAME, "skills"), "project", true));
+	}
+
+	if (options.includeClaudeCodeSkills === true) {
+		for (const root of findWorkspaceSkillRoots(resolvedCwd, ".agents/skills")) {
+			addSkills(loadSkillsFromDirInternal(root, "project", true));
+		}
+		for (const root of findWorkspaceSkillRoots(resolvedCwd, ".claude/skills")) {
+			addSkills(loadSkillsFromDirInternal(root, "project", true));
+		}
+		addSkills(loadSkillsFromDirInternal(resolve(homedir(), ".config", "agents", "skills"), "user", true));
+		addSkills(loadSkillsFromDirInternal(resolve(homedir(), ".claude", "skills"), "user", true));
 	}
 
 	const userSkillsDir = join(resolvedAgentDir, "skills");
