@@ -19,7 +19,20 @@ export interface ThinkingGovernorConfig {
 	fastMaxChars: number;
 	/** Maximum thinking characters as default fallback. */
 	fallbackMaxChars: number;
+	/** Optional Magnitude-style per-role thinking character limits. */
+	roleMaxChars?: Partial<Record<ThinkingGovernorRole, number>>;
 }
+
+export type ThinkingGovernorRole =
+	| "leader"
+	| "finder"
+	| "scout"
+	| "architect"
+	| "engineer"
+	| "critic"
+	| "scientist"
+	| "artisan"
+	| "advisor";
 
 /**
  * Default thinking limits inspired by Magnitude's DeepSeek V4 Pro tuning.
@@ -28,6 +41,17 @@ export const DEFAULT_THINKING_LIMITS: ThinkingGovernorConfig = {
 	fullMaxChars: 5_000,
 	fastMaxChars: 1_500,
 	fallbackMaxChars: 7_000,
+	roleMaxChars: {
+		leader: 20_000,
+		finder: 2_000,
+		scout: 2_000,
+		architect: 20_000,
+		engineer: 20_000,
+		critic: 20_000,
+		scientist: 20_000,
+		artisan: 20_000,
+		advisor: 1_200,
+	},
 };
 
 /**
@@ -50,9 +74,11 @@ export interface ThinkingGovernorState {
 export function createThinkingGovernorState(
 	config: ThinkingGovernorConfig,
 	mode: "full" | "fast" | "scout" | "fallback" = "full",
+	role?: ThinkingGovernorRole,
 ): ThinkingGovernorState {
-	const maxChars =
-		mode === "fast" || mode === "scout"
+	const maxChars = role
+		? (config.roleMaxChars?.[role] ?? config.fallbackMaxChars)
+		: mode === "fast" || mode === "scout"
 			? config.fastMaxChars
 			: mode === "full"
 				? config.fullMaxChars
