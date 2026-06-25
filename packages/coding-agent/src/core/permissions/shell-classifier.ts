@@ -5,7 +5,7 @@
  * across pipelines, separators, and command substitutions.
  */
 
-export type ShellSafetyLevel = "readonly" | "normal" | "forbidden";
+export type ShellSafetyLevel = "readonly" | "normal" | "mass-destructive" | "forbidden";
 
 export interface ShellCommandSegment {
 	name: string;
@@ -405,6 +405,19 @@ function classifySegment(segment: ShellCommandSegment): ShellClassification {
 	const name = basename(segment.name);
 	const args = segment.args;
 
+	if (name === "sudo" && args.length > 0) {
+		const nested = args.filter((arg) => !arg.startsWith("-")).join(" ");
+		const nestedResult = classifyShellCommand(nested);
+		return { ...nestedResult, reason: `sudo wraps ${nestedResult.reason}`, command: segment };
+	}
+	if (SHELL_INTERPRETERS.has(name)) {
+		const commandFlagIndex = args.findIndex((arg) => arg === "-c" || arg.endsWith("c"));
+		const nested = commandFlagIndex === -1 ? undefined : args[commandFlagIndex + 1];
+		if (nested) {
+			const nestedResult = classifyShellCommand(nested.replace(/^["']|["']$/g, ""));
+			return { ...nestedResult, reason: `${name} -c wraps ${nestedResult.reason}`, command: segment };
+		}
+	}
 	if (SHELL_INTERPRETERS.has(name) && segment.separatorBefore === "|") {
 		return { level: "forbidden", reason: "piping commands into a shell is blocked", command: segment };
 	}
@@ -422,6 +435,9 @@ function classifySegment(segment: ShellCommandSegment): ShellClassification {
 	);
 	if (name === "rm" && rmRecursive && (args.includes("/") || args.includes("~") || args.includes("/root"))) {
 		return { level: "forbidden", reason: "recursive removal of root or home is blocked", command: segment };
+	}
+	if (name === "rm" && rmRecursive) {
+		return { level: "mass-destructive", reason: "recursive removal can delete many files", command: segment };
 	}
 	if (name === "chmod" && args.includes("-R") && args.includes("777")) {
 		return { level: "forbidden", reason: "recursive chmod 777 is blocked", command: segment };
@@ -491,12 +507,17 @@ export function classifyShellCommand(command: string): ShellClassification {
 	const segments = parseShellCommand(command);
 	if (segments.length === 0) return { level: "readonly", reason: "empty command" };
 
+	let sawMassDestructive: ShellClassification | undefined;
 	let sawNormal: ShellClassification | undefined;
 	for (const segment of segments) {
 		const result = classifySegment(segment);
 		if (result.level === "forbidden") return result;
+		if (result.level === "mass-destructive" && !sawMassDestructive) sawMassDestructive = result;
 		if (result.level === "normal" && !sawNormal) sawNormal = result;
 	}
 
-	return sawNormal ?? { level: "readonly", reason: "all command segments are read-only", command: segments[0] };
+	return (
+		sawMassDestructive ??
+		sawNormal ?? { level: "readonly", reason: "all command segments are read-only", command: segments[0] }
+	);
 }

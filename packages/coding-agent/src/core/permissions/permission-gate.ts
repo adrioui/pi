@@ -157,6 +157,36 @@ function ruleMatches(
 	return true;
 }
 
+function evaluateDelegateRule(
+	rule: PermissionRule,
+	toolName: string,
+	input: Record<string, unknown>,
+): Pick<PermissionDecision, "permitted" | "action" | "reason"> {
+	void toolName;
+	void input;
+	return {
+		permitted: false,
+		action: "delegate",
+		reason: rule.message ?? "Delegate actions are not supported by this permission gate.",
+	};
+}
+
+function reasonForAction(action: PermissionAction, message?: string): string {
+	if (message) {
+		return message;
+	}
+	switch (action) {
+		case "ask":
+			return "This action requires explicit user confirmation before it can run.";
+		case "delegate":
+			return "Delegated to external permission program.";
+		case "reject":
+			return "Rejected by permission policy.";
+		case "allow":
+			return "Allowed by permission policy.";
+	}
+}
+
 const BUILT_IN_RULES: PermissionRule[] = [
 	// Always allow read-only tools
 	{ tool: "read", action: "allow" },
@@ -216,29 +246,11 @@ export function evaluatePermission(
 	for (let i = 0; i < userRules.length; i++) {
 		const rule = userRules[i]!;
 		if (ruleMatches(rule, toolName, input, contextKind)) {
-			let reason = rule.message;
-			if (!reason) {
-				switch (rule.action) {
-					case "ask":
-						reason = "This action requires explicit user confirmation before it can run.";
-						break;
-					case "delegate":
-						reason = "Delegate actions are not supported by this permission gate.";
-						break;
-					case "reject":
-						reason = "Rejected by permission policy.";
-						break;
-					case "allow":
-						reason = "Allowed by permission policy.";
-						break;
-					default:
-						reason = "Permission decision.";
-				}
-			}
+			const delegated = rule.action === "delegate" ? evaluateDelegateRule(rule, toolName, input) : undefined;
 			return {
-				permitted: rule.action === "allow",
-				action: rule.action,
-				reason,
+				permitted: delegated?.permitted ?? rule.action === "allow",
+				action: delegated?.action ?? rule.action,
+				reason: delegated?.reason ?? reasonForAction(rule.action, rule.message),
 				matchedEntry: rule,
 				matchIndex: i,
 				source: "user",
@@ -248,7 +260,7 @@ export function evaluatePermission(
 
 	if (toolName === "bash" && typeof input.command === "string") {
 		const shellClassification = classifyShellCommand(input.command);
-		if (shellClassification.level === "forbidden") {
+		if (shellClassification.level === "forbidden" || shellClassification.level === "mass-destructive") {
 			return {
 				permitted: false,
 				action: "reject",
@@ -261,29 +273,10 @@ export function evaluatePermission(
 	for (let i = 0; i < BUILT_IN_RULES.length; i++) {
 		const rule = BUILT_IN_RULES[i]!;
 		if (ruleMatches(rule, toolName, input, contextKind)) {
-			let reason = rule.message;
-			if (!reason) {
-				switch (rule.action) {
-					case "ask":
-						reason = "This action requires explicit user confirmation before it can run.";
-						break;
-					case "delegate":
-						reason = "Delegate actions are not supported by this permission gate.";
-						break;
-					case "reject":
-						reason = "Rejected by permission policy.";
-						break;
-					case "allow":
-						reason = "Allowed by permission policy.";
-						break;
-					default:
-						reason = "Permission decision.";
-				}
-			}
 			return {
 				permitted: rule.action === "allow",
 				action: rule.action,
-				reason,
+				reason: reasonForAction(rule.action, rule.message),
 				matchedEntry: rule,
 				matchIndex: userRules.length + i,
 				source: "built-in",
@@ -297,15 +290,12 @@ export function evaluatePermission(
 	// policy requires allow rules for all mutating tools in headless mode.
 	const knownTools = options.knownTools ?? [];
 	if (knownTools.includes(toolName)) {
-		if (options.interactive) {
-			return {
-				permitted: true,
-				action: "allow",
-				reason: "Allowed by default; tool is registered with the runtime",
-				source: "built-in",
-			};
-		}
-		// Non-interactive: fall through to default-deny below
+		return {
+			permitted: true,
+			action: "allow",
+			reason: "Allowed by default; tool is registered with the runtime",
+			source: "built-in",
+		};
 	}
 
 	// Default deny for non-interactive contexts
