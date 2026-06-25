@@ -5,6 +5,139 @@ export interface ToolResultForModel {
 	details: unknown;
 }
 
+/**
+ * Result of validating a tool call and its result.
+ */
+export interface ToolCallValidationResult {
+	/** Whether the tool call and result are valid */
+	isValid: boolean;
+	/** Validation warnings (non-blocking) */
+	warnings: string[];
+	/** Fatal validation errors (blocking) */
+	errors: string[];
+}
+
+/**
+ * Expected result shape for known tools.
+ */
+const TOOL_RESULT_EXPECTATIONS: Record<
+	string,
+	{
+		/** Fields expected in details */
+		detailFields?: string[];
+		/** Whether empty text content is suspicious for a success result */
+		expectContent?: boolean;
+		/** Whether the result should include a path or file reference */
+		expectPath?: boolean;
+	}
+> = {
+	read: { expectContent: true, expectPath: true },
+	bash: { expectContent: true },
+	edit: { expectContent: true, expectPath: true },
+	write: { expectContent: true, expectPath: true },
+	grep: { expectContent: true },
+	find: { expectContent: true },
+	ls: { expectContent: true },
+	restore_snapshot: { expectPath: true, detailFields: ["treeOID"] },
+	checkpoint_changes: { expectPath: true, detailFields: ["since"] },
+	scratchpad_save: { expectPath: true, detailFields: ["path", "category"] },
+	scratchpad_load: { expectContent: true },
+};
+
+/**
+ * Validate a tool call and its result for basic sanity checks.
+ *
+ * Performs tier-1 validation only:
+ * - Well-formedness: Does the result have expected structure?
+ * - Sanity checks: Is empty content suspicious? Are expected fields present?
+ * - Size validation: Is the result within reasonable bounds?
+ *
+ * This is called after tool execution to detect silent failures.
+ */
+export function validateToolCallResult(
+	toolName: string,
+	args: unknown,
+	result: ToolResultForModel,
+	isError: boolean,
+): ToolCallValidationResult {
+	const warnings: string[] = [];
+	const errors: string[] = [];
+
+	// Error results are validated differently - check for error message presence
+	if (isError) {
+		const errorText = result.content
+			.filter((c) => c.type === "text")
+			.map((c) => c.text ?? "")
+			.join("\n")
+			.trim();
+
+		if (!errorText) {
+			errors.push(`Tool ${toolName} returned an error but no error message`);
+		}
+		return { isValid: errors.length === 0, warnings, errors };
+	}
+
+	// Get expectations for this tool
+	const expectations = TOOL_RESULT_EXPECTATIONS[toolName];
+
+	// Extract text content
+	const textContent = result.content
+		.filter((c) => c.type === "text")
+		.map((c) => c.text ?? "")
+		.join("\n")
+		.trim();
+
+	// Check if success result has content when expected
+	if (expectations?.expectContent && !textContent) {
+		warnings.push(`Tool ${toolName} succeeded but returned no text content`);
+	}
+
+	// Check size sanity - warn if result is suspiciously large
+	const contentSize = Buffer.byteLength(textContent, "utf-8");
+	if (contentSize > 1024 * 1024) {
+		warnings.push(`Tool ${toolName} result is unusually large (${formatSize(contentSize)})`);
+	}
+
+	// Check detail fields for known tools
+	if (expectations?.detailFields && result.details && typeof result.details === "object") {
+		const details = result.details as Record<string, unknown>;
+		for (const field of expectations.detailFields) {
+			if (details[field] === undefined) {
+				warnings.push(`Tool ${toolName} result missing expected detail field: ${field}`);
+			}
+		}
+	}
+
+	// Check path-based tools have valid paths in args
+	if (expectations?.expectPath) {
+		const argsObj = args as Record<string, unknown> | undefined;
+		const path = argsObj?.file_path ?? argsObj?.path ?? argsObj?.treeOID;
+		if (!path || (typeof path === "string" && path.trim() === "")) {
+			warnings.push(`Tool ${toolName} called without a valid path argument`);
+		}
+	}
+
+	// Tool-specific validation
+	if (toolName === "bash") {
+		const argsObj = args as Record<string, unknown> | undefined;
+		const command = argsObj?.command;
+		if (!command || (typeof command === "string" && command.trim() === "")) {
+			warnings.push("Bash tool called without a command");
+		}
+	}
+
+	if (toolName === "edit") {
+		const argsObj = args as Record<string, unknown> | undefined;
+		const oldStr = argsObj?.old_str ?? argsObj?.old;
+		const newStr = argsObj?.new_str ?? argsObj?.new;
+		if (!oldStr && !newStr) {
+			warnings.push("Edit tool called without old_str/new_str arguments");
+		}
+	}
+
+	return { isValid: errors.length === 0, warnings, errors };
+}
+
 /** Maximum size for tool results (100KB). */
 const MAX_TOOL_RESULT_BYTES = 100 * 1024;
 
@@ -16,14 +149,13 @@ function truncateTail(content: string, maxBytes: number): { text: string; trunca
 
 	const bytes = Buffer.from(content, "utf-8");
 	const truncatedBytes = bytes.slice(-maxBytes);
-	let text = truncatedBytes.toString("utf-8");
-
-	// Ensure we don't start in the middle of a multi-byte character
-	// by finding the first valid UTF-8 boundary
-	const firstValidBoundary = text.indexOf("");
-	if (firstValidBoundary > 0) {
-		text = text.slice(firstValidBoundary);
+	// Skip any leading continuation bytes (0x10xxxxxx) from a partial
+	// multi-byte sequence that was cut mid-character by the byte slice.
+	let offset = 0;
+	while (offset < truncatedBytes.length && (truncatedBytes[offset]! & 0xc0) === 0x80) {
+		offset++;
 	}
+	const text = truncatedBytes.subarray(offset).toString("utf-8");
 
 	return { text, truncated: true };
 }

@@ -14,7 +14,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export type ScratchpadCategory = "designs" | "plans" | "reports" | "results";
+export type ScratchpadCategory = "designs" | "plans" | "reports" | "results" | "thoughts" | "processes";
 
 export interface ScratchpadArtifact {
 	/** Artifact title */
@@ -105,6 +105,18 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, unknow
 }
 
 /**
+ * Escape a string value for safe inclusion in a double-quoted YAML string.
+ */
+function escapeYamlString(value: string): string {
+	return value
+		.replace(/\\/g, "\\\\")
+		.replace(/"/g, '\\"')
+		.replace(/\n/g, "\\n")
+		.replace(/\r/g, "\\r")
+		.replace(/\t/g, "\\t");
+}
+
+/**
  * Serialize metadata to YAML frontmatter.
  */
 function serializeFrontmatter(metadata: Record<string, unknown>): string {
@@ -113,7 +125,7 @@ function serializeFrontmatter(metadata: Record<string, unknown>): string {
 		if (Array.isArray(value)) {
 			lines.push(`${key}: [${value.join(", ")}]`);
 		} else if (typeof value === "string") {
-			lines.push(`${key}: "${value}"`);
+			lines.push(`${key}: "${escapeYamlString(value)}"`);
 		} else {
 			lines.push(`${key}: ${value}`);
 		}
@@ -145,7 +157,7 @@ export class ScratchpadManager {
 			return;
 		}
 
-		const categories: ScratchpadCategory[] = ["designs", "plans", "reports", "results"];
+		const categories: ScratchpadCategory[] = ["designs", "plans", "reports", "results", "thoughts", "processes"];
 
 		// Create root directory
 		if (!existsSync(this.rootDir)) {
@@ -173,8 +185,18 @@ export class ScratchpadManager {
 			mkdirSync(categoryDir, { recursive: true });
 		}
 
-		const filename = generateArtifactFilename(artifact.title);
-		const filePath = join(categoryDir, filename);
+		let filename = generateArtifactFilename(artifact.title);
+		let filePath = join(categoryDir, filename);
+
+		// Avoid overwriting existing artifacts: append a counter suffix
+		if (existsSync(filePath)) {
+			let counter = 2;
+			while (existsSync(join(categoryDir, `${filename.replace(/\.md$/, `-${counter}.md`)}`))) {
+				counter++;
+			}
+			filename = filename.replace(/\.md$/, `-${counter}.md`);
+			filePath = join(categoryDir, filename);
+		}
 
 		const metadata: Record<string, unknown> = {
 			title: artifact.title,
@@ -231,7 +253,7 @@ export class ScratchpadManager {
 		this.initialize();
 
 		const entries: ScratchpadEntry[] = [];
-		const categories = category ? [category] : ["designs", "plans", "reports", "results"];
+		const categories = category ? [category] : ["designs", "plans", "reports", "results", "thoughts", "processes"];
 
 		for (const cat of categories) {
 			const dir = join(this.rootDir, cat);

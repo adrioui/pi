@@ -15,7 +15,7 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type {
 	Agent,
 	AgentEvent,
@@ -46,6 +46,7 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
+	estimateContextChars,
 	estimateContextTokens,
 	estimateTokens,
 	generateBranchSummary,
@@ -85,10 +86,14 @@ import {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { classifyError, computeJitteredDelay } from "./permissions/error-classifier.ts";
+import { checkInputForGuardedPaths } from "./permissions/guarded-paths.ts";
+import { evaluatePermission, type PermissionDecision, type PermissionRule } from "./permissions/permission-gate.ts";
 import { classifyPromptVariant } from "./prompt-family.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { loadReviewChecks } from "./review-checks.ts";
+import { ScratchpadManager } from "./scratchpad-manager.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -96,12 +101,23 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSnapshot, isGitRepo } from "./snapshot.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
+import {
+	createThinkingGovernorState,
+	DEFAULT_THINKING_LIMITS,
+	feedThinkingDelta,
+	generateOverthinkingFeedback,
+	isOverthinking,
+	type ThinkingGovernorState,
+} from "./thinking-governor.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
+import { createCheckpointChangesToolDefinition } from "./tools/checkpoint-changes.ts";
 import { createCodeReviewToolDefinition } from "./tools/code-review.ts";
 import { createFindFilesToolDefinition } from "./tools/find-files.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createOracleToolDefinition } from "./tools/oracle.ts";
 import { createRestoreSnapshotToolDefinition } from "./tools/restore-snapshot.ts";
+import { createScratchpadLoadToolDefinition } from "./tools/scratchpad-load.ts";
+import { createScratchpadSaveToolDefinition } from "./tools/scratchpad-save.ts";
 import { createTaskToolDefinition } from "./tools/task.ts";
 import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/tool-definition-wrapper.ts";
 
@@ -183,8 +199,18 @@ export interface AgentSessionConfig {
 	initialActiveToolNames?: string[];
 	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
 	allowedToolNames?: string[];
+	/** Whether allowlisted tools should all be active initially. Default: true for compatibility. */
+	autoActivateAllowedTools?: boolean;
 	/** Optional denylist of tool names. When provided, these tool names are not exposed. */
 	excludedToolNames?: string[];
+	/** Optional permission rules evaluated before built-in policy. */
+	permissionRules?: PermissionRule[];
+	/** Optional delegate for permission rules with action="delegate". */
+	permissionDelegate?: (
+		decision: PermissionDecision,
+		toolName: string,
+		input: Record<string, unknown>,
+	) => Promise<boolean | { permitted: boolean; reason?: string }>;
 	/**
 	 * Override base tools (useful for custom runtimes).
 	 *
@@ -319,7 +345,14 @@ export class AgentSession {
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
+	private _autoActivateAllowedTools = true;
 	private _excludedToolNames?: Set<string>;
+	private _permissionRules: PermissionRule[] = [];
+	private _permissionDelegate?: (
+		decision: PermissionDecision,
+		toolName: string,
+		input: Record<string, unknown>,
+	) => Promise<boolean | { permitted: boolean; reason?: string }>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
@@ -344,11 +377,16 @@ export class AgentSession {
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 
 	// Auto-snapshot state
-	private _snapshotMap: Map<string, string> = new Map();
 	private _snapshotEnabled = false;
+
+	// Scratchpad state
+	private _scratchpad: ScratchpadManager;
 
 	// Guidance discovery state (Phase 2)
 	private _touchedFiles: Set<string> = new Set();
+
+	// Magnitude-style thinking governor state (reset each turn)
+	private _thinkingGovernorState: ThinkingGovernorState | undefined;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -362,9 +400,18 @@ export class AgentSession {
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
+		this._autoActivateAllowedTools = config.autoActivateAllowedTools ?? true;
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
+		this._permissionRules = config.permissionRules ?? [];
+		this._permissionDelegate = config.permissionDelegate;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+
+		// Initialize scratchpad manager
+		this._scratchpad = new ScratchpadManager({
+			rootDir: join(config.cwd, ".pi", "scratchpad"),
+			autoCreate: true,
+		});
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -432,6 +479,98 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+			const input = args as Record<string, unknown>;
+
+			// Permission gate check: evaluate built-in and user rules
+			const interactive = this._extensionRunner?.hasUI?.() ?? true;
+			const knownTools = Array.from(this._toolRegistry.keys());
+			const permissionDecision = evaluatePermission(toolCall.name, input, {
+				userRules: this._permissionRules,
+				interactive,
+				context: "thread",
+				knownTools,
+			});
+
+			let permissionOverrideAllowed = false;
+			if (permissionDecision.action === "ask" && interactive) {
+				const approved = await this._extensionRunner
+					.getUIContext()
+					.confirm(
+						"Approve tool call?",
+						`Tool: ${toolCall.name}\nReason: ${permissionDecision.reason ?? "Permission rule requires confirmation."}`,
+					);
+				if (!approved) {
+					return {
+						immediateResult: {
+							content: [
+								{
+									type: "text" as const,
+									text: `[Permission Gate] Tool \`${toolCall.name}\` was blocked. Reason: user denied confirmation.`,
+								},
+							],
+							details: undefined,
+						},
+						immediateResultIsError: true,
+					};
+				}
+				permissionOverrideAllowed = true;
+			} else if (permissionDecision.action === "delegate" && this._permissionDelegate) {
+				const delegated = await this._permissionDelegate(permissionDecision, toolCall.name, input);
+				const delegatedDecision =
+					typeof delegated === "boolean" ? { permitted: delegated, reason: permissionDecision.reason } : delegated;
+				if (!delegatedDecision.permitted) {
+					return {
+						immediateResult: {
+							content: [
+								{
+									type: "text" as const,
+									text: `[Permission Gate] Tool \`${toolCall.name}\` was blocked. Reason: ${delegatedDecision.reason ?? permissionDecision.reason ?? "delegated policy denied the call"}`,
+								},
+							],
+							details: undefined,
+						},
+						immediateResultIsError: true,
+					};
+				}
+				permissionOverrideAllowed = true;
+			}
+
+			if (!permissionDecision.permitted && !permissionOverrideAllowed) {
+				return {
+					immediateResult: {
+						content: [
+							{
+								type: "text" as const,
+								text: `[Permission Gate] Tool \`${toolCall.name}\` was blocked. Reason: ${permissionDecision.reason ?? "No rule matched"}`,
+							},
+						],
+						details: undefined,
+					},
+					immediateResultIsError: true,
+				};
+			}
+
+			// Guarded path check: block mutating tools on sensitive paths
+			const mutatingTools = new Set(["edit", "write", "bash", "edit-diff"]);
+			if (mutatingTools.has(toolCall.name)) {
+				const guardedPathResult = checkInputForGuardedPaths(input);
+				if (guardedPathResult) {
+					return {
+						immediateResult: {
+							content: [
+								{
+									type: "text" as const,
+									text: `[Permission Gate] Tool \`${toolCall.name}\` was blocked on guarded path \`${guardedPathResult.path}\` (matched pattern: \`${guardedPathResult.pattern}\`). This path is protected from mutation.`,
+								},
+							],
+							details: undefined,
+						},
+						immediateResultIsError: true,
+					};
+				}
+			}
+
+			// Extension tool_call hooks
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return undefined;
@@ -442,7 +581,7 @@ export class AgentSession {
 					type: "tool_call",
 					toolName: toolCall.name,
 					toolCallId: toolCall.id,
-					input: args as Record<string, unknown>,
+					input,
 				});
 
 				// Handle middleware synthesize result: return immediate result to bypass execution
@@ -575,6 +714,21 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		// Reset thinking governor at the start of each assistant turn so budgets
+		// are tracked per turn.
+		if (event.type === "turn_start") {
+			this._resetThinkingGovernor();
+		}
+
+		// Feed thinking deltas to the Magnitude-style governor.
+		if (
+			event.type === "message_update" &&
+			event.assistantMessageEvent?.type === "thinking_delta" &&
+			event.assistantMessageEvent.delta
+		) {
+			await this._feedThinkingDelta(event.assistantMessageEvent.delta);
+		}
+
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -1009,7 +1163,6 @@ export class AgentSession {
 				promptGuidelines.push(...toolGuidelines);
 			}
 		}
-
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
 		const appendSystemPrompt =
@@ -1155,6 +1308,11 @@ export class AgentSession {
 		if (await this._checkCompaction(msg)) {
 			return true;
 		}
+
+		// Drain any stale steering messages queued by internal systems (e.g.,
+		// thinking governor warning) that were intended for the next model call.
+		// The turn completed successfully, so these are no longer needed.
+		this._steeringMessages = [];
 
 		// The agent loop drains both queues before emitting agent_end. Any messages
 		// here were queued by agent_end extension handlers and need a continuation.
@@ -1321,13 +1479,16 @@ export class AgentSession {
 
 		preflightResult?.(true);
 
+		// Wire up session ID on scratchpad for artifact metadata tracing
+		this._scratchpad.setSessionId(this.sessionId);
+
 		// Auto-snapshot: capture git tree state before the agent turn
 		const experimental = this.settingsManager.getExperimentalSettings();
 		if (experimental.autoSnapshot && isGitRepo(this._cwd)) {
 			const messageId = randomUUID();
 			const treeOID = createSnapshot(this._cwd, this.sessionId, messageId);
-			if (treeOID) {
-				this._snapshotMap.set(messageId, treeOID);
+			if (!treeOID) {
+				// Snapshot creation failed; continue without blocking
 			}
 		}
 
@@ -1804,6 +1965,61 @@ export class AgentSession {
 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
 	}
 
+	/**
+	 * Determine the thinking-governor mode from current session state.
+	 * This is a temporary heuristic until tool modes are fully integrated;
+	 * low/minimal thinking maps to the fast budget, medium/high/default to the
+	 * full budget, and unknown states fall back to the largest budget.
+	 */
+	private _getThinkingGovernorMode(): "full" | "fast" | "fallback" {
+		switch (this.thinkingLevel) {
+			case "minimal":
+			case "low":
+				return "fast";
+			case "medium":
+			case "high":
+			case "xhigh":
+				return "full";
+			default:
+				return this.supportsThinking() ? "full" : "fallback";
+		}
+	}
+
+	/**
+	 * Reset the thinking governor state for a new turn.
+	 */
+	private _resetThinkingGovernor(): void {
+		this._thinkingGovernorState = createThinkingGovernorState(
+			DEFAULT_THINKING_LIMITS,
+			this._getThinkingGovernorMode(),
+		);
+	}
+
+	/**
+	 * Feed a thinking_delta string to the governor and inject overthinking
+	 * feedback if the budget is newly exceeded. The feedback is queued as a
+	 * steering message so the model sees it before its next response without
+	 * losing in-flight tool results.
+	 */
+	private async _feedThinkingDelta(deltaText: string): Promise<void> {
+		if (!this._thinkingGovernorState) {
+			this._resetThinkingGovernor();
+		}
+
+		const result = feedThinkingDelta(this._thinkingGovernorState!, deltaText);
+		this._thinkingGovernorState = result.state;
+
+		if (result.newlyExceeded) {
+			const feedback = generateOverthinkingFeedback(result.state);
+			await this._queueSteer(feedback);
+		} else if (isOverthinking(deltaText)) {
+			await this._queueSteer(
+				"[Thinking Governor] Your reasoning appears to be looping without grounding in tool observations. " +
+					"Call a tool to gather evidence, or commit to a decision and act.",
+			);
+		}
+	}
+
 	// =========================================================================
 	// Queue Mode Management
 	// =========================================================================
@@ -2089,7 +2305,12 @@ export class AgentSession {
 		} else {
 			contextTokens = directContextTokens;
 		}
-		if (shouldCompact(contextTokens, contextWindow, settings)) {
+		const contextChars = estimateContextChars(this.agent.state.messages);
+		const continuationCharThreshold = settings.continuationCharThreshold ?? 100000;
+		if (
+			(continuationCharThreshold > 0 && contextChars >= continuationCharThreshold) ||
+			shouldCompact(contextTokens, contextWindow, settings)
+		) {
 			return await this._runAutoCompaction("threshold", false);
 		}
 		return false;
@@ -2536,7 +2757,7 @@ export class AgentSession {
 		}
 		this._toolDefinitions = definitionRegistry;
 
-		// Register restore_snapshot tool when auto-snapshot is enabled
+		// Register restore_snapshot and checkpoint_changes tools when auto-snapshot is enabled
 		const experimental = this.settingsManager?.getExperimentalSettings();
 		this._snapshotEnabled = experimental?.autoSnapshot ?? false;
 		if (this._snapshotEnabled && isAllowedTool("restore_snapshot")) {
@@ -2546,6 +2767,14 @@ export class AgentSession {
 				sourceInfo: createSyntheticSourceInfo("<builtin:restore_snapshot>", { source: "builtin" }),
 			};
 			this._toolDefinitions.set("restore_snapshot", snapshotToolEntry);
+		}
+		if (this._snapshotEnabled && isAllowedTool("checkpoint_changes")) {
+			const checkpointToolDef = createCheckpointChangesToolDefinition(this._cwd, this.sessionId);
+			const checkpointToolEntry: ToolDefinitionEntry = {
+				definition: checkpointToolDef,
+				sourceInfo: createSyntheticSourceInfo("<builtin:checkpoint_changes>", { source: "builtin" }),
+			};
+			this._toolDefinitions.set("checkpoint_changes", checkpointToolEntry);
 		}
 
 		this._toolPromptSnippets = new Map(
@@ -2581,13 +2810,45 @@ export class AgentSession {
 			toolRegistry.set(tool.name, tool);
 		}
 
-		// Register restore_snapshot agent tool when auto-snapshot is enabled
+		// Register restore_snapshot and checkpoint_changes agent tools when auto-snapshot is enabled
 		if (this._snapshotEnabled && isAllowedTool("restore_snapshot")) {
 			const snapshotEntry = this._toolDefinitions.get("restore_snapshot");
 			if (snapshotEntry) {
 				const wrappedSnapshotTool = wrapToolDefinition(snapshotEntry.definition, () => runner.createContext());
 				toolRegistry.set("restore_snapshot", wrappedSnapshotTool);
 			}
+		}
+		if (this._snapshotEnabled && isAllowedTool("checkpoint_changes")) {
+			const checkpointEntry = this._toolDefinitions.get("checkpoint_changes");
+			if (checkpointEntry) {
+				const wrappedCheckpointTool = wrapToolDefinition(checkpointEntry.definition, () => runner.createContext());
+				toolRegistry.set("checkpoint_changes", wrappedCheckpointTool);
+			}
+		}
+		// Register scratchpad tools (always available)
+		if (isAllowedTool("scratchpad_save")) {
+			const saveDef = createScratchpadSaveToolDefinition(this._scratchpad);
+			const saveEntry: ToolDefinitionEntry = {
+				definition: saveDef,
+				sourceInfo: createSyntheticSourceInfo("<builtin:scratchpad_save>", { source: "builtin" }),
+			};
+			this._toolDefinitions.set("scratchpad_save", saveEntry);
+			toolRegistry.set(
+				"scratchpad_save",
+				wrapToolDefinition(saveDef, () => runner.createContext()),
+			);
+		}
+		if (isAllowedTool("scratchpad_load")) {
+			const loadDef = createScratchpadLoadToolDefinition(this._scratchpad);
+			const loadEntry: ToolDefinitionEntry = {
+				definition: loadDef,
+				sourceInfo: createSyntheticSourceInfo("<builtin:scratchpad_load>", { source: "builtin" }),
+			};
+			this._toolDefinitions.set("scratchpad_load", loadEntry);
+			toolRegistry.set(
+				"scratchpad_load",
+				wrapToolDefinition(loadDef, () => runner.createContext()),
+			);
 		}
 
 		// Register find_files / oracle / task subagent tools when subagents are enabled
@@ -2690,6 +2951,20 @@ export class AgentSession {
 		) {
 			nextActiveToolNames.push("restore_snapshot");
 		}
+		if (
+			this._snapshotEnabled &&
+			isAllowedTool("checkpoint_changes") &&
+			!nextActiveToolNames.includes("checkpoint_changes")
+		) {
+			nextActiveToolNames.push("checkpoint_changes");
+		}
+
+		// Scratchpad tools are always available
+		for (const name of ["scratchpad_save", "scratchpad_load"]) {
+			if (isAllowedTool(name) && !nextActiveToolNames.includes(name)) {
+				nextActiveToolNames.push(name);
+			}
+		}
 
 		if (subagentsEnabled) {
 			for (const name of ["find_files", "oracle", "task", "code_review"]) {
@@ -2699,7 +2974,7 @@ export class AgentSession {
 			}
 		}
 
-		if (allowedToolNames) {
+		if (allowedToolNames && this._autoActivateAllowedTools) {
 			for (const toolName of this._toolRegistry.keys()) {
 				if (allowedToolNames.has(toolName)) {
 					nextActiveToolNames.push(toolName);
@@ -2810,7 +3085,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * Check if an error is retryable (overloaded, rate limit, server errors).
+	 * Check if an error is retryable using the Amp-style error classifier.
 	 * Context overflow errors are NOT retryable (handled by compaction instead).
 	 */
 	private _isRetryableError(message: AssistantMessage): boolean {
@@ -2822,10 +3097,9 @@ export class AgentSession {
 
 		const err = message.errorMessage;
 		if (this._isNonRetryableProviderLimitError(err)) return false;
-		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504, service unavailable, network/connection errors (including connection lost), WebSocket transport closes/errors, fetch failed, premature stream endings, HTTP/2 closed before response, terminated, retry delay exceeded
-		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i.test(
-			err,
-		);
+
+		const classification = classifyError(err);
+		return classification.retryable;
 	}
 
 	/**
@@ -2846,14 +3120,17 @@ export class AgentSession {
 			return false;
 		}
 
-		const delayMs = Math.min(settings.baseDelayMs * 2 ** (this._retryAttempt - 1), 60000); // 60s cap (Amp-style)
+		const errorMessage = message.errorMessage || "Unknown error";
+		const classification = classifyError(errorMessage);
+		const serverDelayMs = classification.retryDelayMs;
+		const delayMs = computeJitteredDelay(this._retryAttempt - 1, settings.baseDelayMs, 60000, serverDelayMs);
 
 		this._emit({
 			type: "auto_retry_start",
 			attempt: this._retryAttempt,
 			maxAttempts: settings.maxRetries,
 			delayMs,
-			errorMessage: message.errorMessage || "Unknown error",
+			errorMessage,
 		});
 
 		// Remove error message from agent state (keep in session for history)

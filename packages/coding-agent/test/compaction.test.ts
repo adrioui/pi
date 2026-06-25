@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai/compat";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { readFileSync } from "fs";
@@ -9,8 +9,11 @@ import {
 	calculateContextTokens,
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
+	estimateContextChars,
 	estimateContextTokens,
 	findCutPoint,
+	generateBranchSummary,
+	generateSummary,
 	getLastAssistantUsage,
 	prepareCompaction,
 	shouldCompact,
@@ -170,6 +173,27 @@ function extractText(messages: AgentMessage[]): string {
 		.join("\n");
 }
 
+function extractFirstPromptText(context: Parameters<StreamFn>[1]): string {
+	const message = context.messages[0];
+	if (!message || !("content" in message)) return "";
+	const { content } = message;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((block): block is { type: "text"; text: string } => block.type === "text")
+		.map((block) => block.text)
+		.join("\n");
+}
+
+function createPromptCapturingStreamFn(capturedPrompts: string[]): StreamFn {
+	return async (_model, context) => {
+		capturedPrompts.push(extractFirstPromptText(context));
+		return {
+			result: async () => createAssistantMessage("summary"),
+		} as unknown as Awaited<ReturnType<StreamFn>>;
+	};
+}
+
 // ============================================================================
 // Unit tests
 // ============================================================================
@@ -252,6 +276,13 @@ describe("estimateContextTokens", () => {
 		expect(estimate.lastUsageIndex).toBe(1);
 		expect(estimate.trailingTokens).toBeGreaterThan(0);
 		expect(estimate.tokens).toBe(150 + estimate.trailingTokens);
+	});
+});
+
+describe("estimateContextChars", () => {
+	it("estimates continuation resume character size", () => {
+		const messages: AgentMessage[] = [createUserMessage("abcd"), createAssistantMessage("efgh")];
+		expect(estimateContextChars(messages)).toBeGreaterThanOrEqual(8);
 	});
 });
 
@@ -467,6 +498,69 @@ describe("prepareCompaction with previous compaction", () => {
 		expect(summarizedText).toContain("user msg 3 - kept by compaction1");
 		expect(summarizedText).not.toContain("First summary");
 		expect(preparation!.previousSummary).toBe("First summary");
+	});
+});
+
+describe("summarization prompts", () => {
+	it("instructs compaction summaries to preserve failed attempts and blockers", async () => {
+		const capturedPrompts: string[] = [];
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+
+		await generateSummary(
+			[createUserMessage("continue after npm run check failed")],
+			model,
+			DEFAULT_COMPACTION_SETTINGS.reserveTokens,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			"off",
+			createPromptCapturingStreamFn(capturedPrompts),
+		);
+
+		expect(capturedPrompts[0]).toContain("Preserve failed attempts, negative results");
+		expect(capturedPrompts[0]).toContain("Do not mark work as done unless");
+		expect(capturedPrompts[0]).toContain("Preserve exact validation commands and outcomes");
+	});
+
+	it("instructs updated summaries to preserve prior negative results", async () => {
+		const capturedPrompts: string[] = [];
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+
+		await generateSummary(
+			[createUserMessage("new messages")],
+			model,
+			DEFAULT_COMPACTION_SETTINGS.reserveTokens,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			"previous summary",
+			"off",
+			createPromptCapturingStreamFn(capturedPrompts),
+		);
+
+		expect(capturedPrompts[0]).toContain("Preserve failed attempts, negative results");
+		expect(capturedPrompts[0]).toContain("from both old and new context");
+		expect(capturedPrompts[0]).toContain("<previous-summary>");
+	});
+
+	it("instructs branch summaries to preserve negative results", async () => {
+		const capturedPrompts: string[] = [];
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+
+		const result = await generateBranchSummary([createMessageEntry(createUserMessage("branch failed"))], {
+			model,
+			apiKey: "test-key",
+			signal: new AbortController().signal,
+			streamFn: createPromptCapturingStreamFn(capturedPrompts),
+		});
+
+		expect(result.summary).toContain("summary");
+		expect(capturedPrompts[0]).toContain("Preserve failed attempts, negative results");
+		expect(capturedPrompts[0]).toContain("Do not mark work as done unless");
+		expect(capturedPrompts[0]).toContain("Preserve exact validation commands and outcomes");
 	});
 });
 

@@ -11,6 +11,7 @@ import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefi
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel } from "./model-resolver.ts";
+import type { PermissionDecision, PermissionRule } from "./permissions/permission-gate.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
@@ -48,6 +49,14 @@ export interface CreateAgentSessionOptions {
 	thinkingLevel?: ThinkingLevel;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	/** Optional permission rules evaluated before built-in policy. */
+	permissionRules?: PermissionRule[];
+	/** Optional delegate for permission rules with action="delegate". */
+	permissionDelegate?: (
+		decision: PermissionDecision,
+		toolName: string,
+		input: Record<string, unknown>,
+	) => Promise<boolean | { permitted: boolean; reason?: string }>;
 
 	/**
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
@@ -386,6 +395,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		initialActiveToolNames,
 		allowedToolNames,
 		excludedToolNames,
+		permissionRules: options.permissionRules,
+		permissionDelegate: options.permissionDelegate,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
 	});

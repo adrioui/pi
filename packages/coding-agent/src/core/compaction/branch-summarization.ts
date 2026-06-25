@@ -268,7 +268,7 @@ Use this EXACT format:
 - [ ] [Work that was started but not finished]
 
 ### Blocked
-- [Issues preventing progress, if any]
+- [Issues preventing progress, failed attempts, negative results, failing commands/tests, or unresolved external blockers]
 
 ## Key Decisions
 - **[Decision]**: [Brief rationale]
@@ -276,7 +276,11 @@ Use this EXACT format:
 ## Next Steps
 1. [What should happen next to continue this work]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+Keep each section concise. Preserve exact file paths, function names, and error messages.
+Rules for accuracy:
+- Do not mark work as done unless the branch shows it completed successfully.
+- Preserve failed attempts, negative results, rejected approaches, and blockers so the resumed branch does not repeat them.
+- Preserve exact validation commands and outcomes, including failures and skipped checks.`;
 
 /**
  * Generate a summary of abandoned branch entries.

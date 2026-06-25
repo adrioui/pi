@@ -195,6 +195,36 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).not.toContain("You are an expert coding assistant operating inside pi");
 		});
 
+		test("open-source-explicit prompt includes economics section", () => {
+			const prompt = buildSystemPrompt({
+				promptVariant: "open-source-explicit",
+				toolSnippets: {
+					read: "Read file contents",
+					bash: "Execute bash commands",
+				},
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("Economics:");
+			expect(prompt).toContain("Thinking costs output tokens and time.");
+			expect(prompt).toContain("Do not recite file contents");
+			expect(prompt).toContain("Batch independent tool calls into a single turn");
+			expect(prompt).toContain("Delegate context-gathering to subagents");
+		});
+
+		test("default prompt does NOT include economics section", () => {
+			const prompt = buildSystemPrompt({
+				promptVariant: "default",
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).not.toContain("Economics:");
+		});
+
 		test("open-source-explicit prompt includes condensed pi docs guidance with README/docs/examples paths", () => {
 			const prompt = buildSystemPrompt({
 				promptVariant: "open-source-explicit",

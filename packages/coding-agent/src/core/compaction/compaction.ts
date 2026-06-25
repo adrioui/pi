@@ -117,12 +117,14 @@ export interface CompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
 	keepRecentTokens: number;
+	continuationCharThreshold?: number;
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	enabled: true,
 	reserveTokens: 16384,
 	keepRecentTokens: 20000,
+	continuationCharThreshold: 100000,
 };
 
 // ============================================================================
@@ -217,6 +219,19 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 		trailingTokens,
 		lastUsageIndex: usageInfo.index,
 	};
+}
+
+/**
+ * Estimate serialized conversation size in characters for Amp-style
+ * continuation-resume compaction. This is intentionally conservative and uses
+ * the existing token estimator's chars/4 basis.
+ */
+export function estimateContextChars(messages: AgentMessage[]): number {
+	let chars = 0;
+	for (const message of messages) {
+		chars += estimateTokens(message) * 4;
+	}
+	return chars;
 }
 
 /**
@@ -457,77 +472,78 @@ export function findCutPoint(
 // Summarization
 // ============================================================================
 
-const SUMMARIZATION_PROMPT = `The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
+export const CONTINUATION_RESUME_PROMPT = `The messages above are a conversation to summarize. Create a structured continuation summary that will allow another LLM to resume the work efficiently after the conversation history is replaced with this summary.
 
 Use this EXACT format:
 
-## Goal
-[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+## Task Overview
+- [The user's core request and success criteria]
+- [Clarifications, constraints, and user-specified priorities]
 
-## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned by user]
-- [Or "(none)" if none were mentioned]
+## Current State
+- [What has been completed so far]
+- [Files created, modified, or analyzed, with exact paths]
+- [Key outputs, artifacts, or validation results produced]
 
-## Progress
-### Done
-- [x] [Completed tasks/changes]
-
-### In Progress
-- [ ] [Current work]
-
-### Blocked
-- [Issues preventing progress, if any]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale]
+## Important Discoveries
+- [Technical constraints or requirements uncovered]
+- [Decisions made and rationale]
+- [Errors encountered and how they were resolved]
+- [Approaches tried that did not work, including why]
 
 ## Next Steps
-1. [Ordered list of what should happen next]
+1. [Specific action needed next]
+2. [Continue in priority order]
 
-## Critical Context
-- [Any data, examples, or references needed to continue]
-- [Or "(none)" if not applicable]
+## Context to Preserve
+- [User preferences or style requirements]
+- [Domain-specific details that are not obvious]
+- [Promises made to the user]
+- [Blockers, open questions, and external constraints]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+Keep each section concise. Preserve exact file paths, function names, and error messages.
+Rules for accuracy:
+- Do not mark work as done unless the conversation shows it completed successfully.
+- Preserve failed attempts, negative results, rejected approaches, and blockers so the next model does not repeat them.
+- Preserve exact validation commands and outcomes, including failures and skipped checks.`;
+
+const SUMMARIZATION_PROMPT = CONTINUATION_RESUME_PROMPT;
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
-Update the existing structured summary with new information. RULES:
+Update the existing structured continuation summary with new information. RULES:
 - PRESERVE all existing information from the previous summary
 - ADD new progress, decisions, and context from the new messages
-- UPDATE the Progress section: move items from "In Progress" to "Done" when completed
+- UPDATE Current State and Next Steps based on what was accomplished
 - UPDATE "Next Steps" based on what was accomplished
 - PRESERVE exact file paths, function names, and error messages
 - If something is no longer relevant, you may remove it
 
 Use this EXACT format:
 
-## Goal
-[Preserve existing goals, add new ones if the task expanded]
+## Task Overview
+- [Preserve existing goals and success criteria, add new ones if task expanded]
+- [Preserve constraints and user-specified priorities]
 
-## Constraints & Preferences
-- [Preserve existing, add new ones discovered]
+## Current State
+- [Previously completed work and newly completed work]
+- [Files created, modified, or analyzed, with exact paths]
+- [Key outputs, artifacts, or validation results produced]
 
-## Progress
-### Done
-- [x] [Include previously done items AND newly completed items]
-
-### In Progress
-- [ ] [Current work - update based on progress]
-
-### Blocked
-- [Current blockers - remove if resolved]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale] (preserve all previous, add new)
+## Important Discoveries
+- [Preserve technical constraints, decisions, rationale, errors, resolved issues, failed attempts, and negative results]
 
 ## Next Steps
-1. [Update based on current state]
+1. [Update based on current state, in priority order]
 
-## Critical Context
-- [Preserve important context, add new if needed]
+## Context to Preserve
+- [Preserve preferences, domain details, promises, blockers, open questions, and external constraints]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+Keep each section concise. Preserve exact file paths, function names, and error messages.
+Rules for accuracy:
+- Do not mark work as done unless the new conversation confirms it completed successfully.
+- Preserve failed attempts, negative results, rejected approaches, and blockers from both old and new context.
+- Preserve exact validation commands and outcomes, including failures and skipped checks.`;
 
 function createSummarizationOptions(
 	model: Model<any>,
@@ -742,12 +758,15 @@ Summarize the prefix to provide context for the retained suffix:
 [What did the user ask for in this turn?]
 
 ## Early Progress
-- [Key decisions and work done in the prefix]
+- [Key decisions, work done, failed attempts, and negative results in the prefix]
 
 ## Context for Suffix
 - [Information needed to understand the retained recent work]
 
-Be concise. Focus on what's needed to understand the kept suffix.`;
+Be concise. Focus on what's needed to understand the kept suffix.
+Rules for accuracy:
+- Do not overstate partial or failed work as completed.
+- Preserve exact blockers, errors, failing commands/tests, and unresolved questions needed to continue.`;
 
 /**
  * Generate summaries for compaction using prepared data.

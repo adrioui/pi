@@ -11,6 +11,7 @@ export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
+	continuationCharThreshold?: number; // default: 100000
 }
 
 export interface BranchSummarySettings {
@@ -784,11 +785,21 @@ export class SettingsManager {
 		return this.settings.compaction?.keepRecentTokens ?? 20000;
 	}
 
-	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {
+	getCompactionContinuationCharThreshold(): number {
+		return this.settings.compaction?.continuationCharThreshold ?? 100000;
+	}
+
+	getCompactionSettings(): {
+		enabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+		continuationCharThreshold: number;
+	} {
 		return {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
+			continuationCharThreshold: this.getCompactionContinuationCharThreshold(),
 		};
 	}
 

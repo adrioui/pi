@@ -119,11 +119,21 @@ export function createSnapshot(workspaceRoot: string, sessionId: string, message
 /**
  * Restore the working tree to a previous snapshot.
  *
- * Uses `git checkout --no-overlay <treeOID> -- <path ?? ".">` to reset
- * files, including deleting files not present in the snapshot.
+ * 1. Cleans untracked files not present in the snapshot.
+ * 2. Uses `git checkout --no-overlay <treeOID> -- <path ?? ".">` to reset tracked changes.
  */
 export function restoreSnapshot(workspaceRoot: string, treeOID: string, path?: string): void {
 	const checkoutPath = path || ".";
+	// Remove untracked files not in the snapshot, except .git and pi internal dirs
+	try {
+		execFileSync(
+			"git",
+			["clean", "-fd", "-e", ".git", "-e", ".pi", checkoutPath === "." ? "" : checkoutPath].filter(Boolean),
+			{ cwd: workspaceRoot, stdio: "pipe" },
+		);
+	} catch {
+		// Ignore clean errors; checkout will still overwrite tracked files
+	}
 	execFileSync("git", ["checkout", "--no-overlay", treeOID, "--", checkoutPath], {
 		cwd: workspaceRoot,
 		stdio: "pipe",
@@ -173,5 +183,164 @@ export function listSnapshots(
 		return entries.sort((a, b) => a.timestamp - b.timestamp);
 	} catch {
 		return [];
+	}
+}
+
+/**
+ * Get the diff between two tree snapshots.
+ *
+ * Returns a unified diff of files that changed between the two trees.
+ * Uses `git diff-tree --no-commit-id -r` to list changed paths, then
+ * `git diff --no-index` to produce the actual diff text.
+ *
+ * If `globPattern` is provided, only files matching the pattern are included.
+ */
+export function diffSnapshots(
+	workspaceRoot: string,
+	fromTreeOID: string,
+	toTreeOID: string,
+	globPattern?: string,
+): { changedFiles: string[]; diff: string } {
+	try {
+		// Get the list of changed files between the two trees
+		const changedFilesRaw = execFileSync(
+			"git",
+			["diff-tree", "--no-commit-id", "-r", "--name-status", fromTreeOID, toTreeOID],
+			{
+				cwd: workspaceRoot,
+				stdio: "pipe",
+				encoding: "utf-8",
+			},
+		).trim();
+
+		if (!changedFilesRaw) {
+			return { changedFiles: [], diff: "" };
+		}
+
+		const allChangedFiles: string[] = [];
+		for (const line of changedFilesRaw.split("\n")) {
+			const parts = line.split("\t");
+			if (parts.length >= 2) {
+				allChangedFiles.push(parts[parts.length - 1]);
+			}
+		}
+
+		// Filter by glob pattern if provided (simple prefix/suffix matching)
+		const changedFiles = globPattern
+			? allChangedFiles.filter((f) => matchesSimpleGlob(f, globPattern))
+			: allChangedFiles;
+
+		if (changedFiles.length === 0) {
+			return { changedFiles: [], diff: "" };
+		}
+
+		// Generate diff for changed files using git diff between two tree objects
+		const diffArgs = ["diff", "--no-color", fromTreeOID, toTreeOID];
+		if (globPattern) {
+			// Use pathspec filtering
+			diffArgs.push("--", globPattern);
+		}
+
+		let diff: string;
+		try {
+			diff = execFileSync("git", diffArgs, {
+				cwd: workspaceRoot,
+				stdio: "pipe",
+				encoding: "utf-8",
+			});
+		} catch (err) {
+			// git diff exits with code 1 when there are differences
+			if (err instanceof Error && "stdout" in err) {
+				diff = (err as { stdout: string }).stdout ?? "";
+			} else {
+				diff = "";
+			}
+		}
+
+		return { changedFiles, diff };
+	} catch {
+		return { changedFiles: [], diff: "" };
+	}
+}
+
+/**
+ * Simple glob matching: supports `*` wildcard and exact prefix/suffix.
+ * For patterns like `*.ts`, `src/**`, `*.md`.
+ */
+function matchesSimpleGlob(path: string, pattern: string): boolean {
+	if (pattern === "*") return true;
+	// Convert glob to regex
+	const regex = pattern
+		.replace(/\./g, "\\.")
+		.replace(/\*\*/g, "<<<GLOBSTAR>>>")
+		.replace(/\*/g, "[^/]*")
+		.replace(/<<<GLOBSTAR>>>/g, ".*");
+	return new RegExp(`^${regex}$`).test(path);
+}
+
+/**
+ * Diff a snapshot tree against the current working tree.
+ *
+ * Uses `git diff <treeOID>` which compares the tree object against
+ * the current worktree. This is useful for detecting mid-turn changes
+ * that haven't been snapshotted yet.
+ */
+export function diffSnapshotAgainstWorktree(
+	workspaceRoot: string,
+	fromTreeOID: string,
+	globPattern?: string,
+): { changedFiles: string[]; diff: string } {
+	try {
+		// List changed files between tree and worktree
+		const listArgs = ["diff", "--name-status", fromTreeOID];
+		if (globPattern) {
+			listArgs.push("--", globPattern);
+		}
+		const changedFilesRaw = execFileSync("git", listArgs, {
+			cwd: workspaceRoot,
+			stdio: "pipe",
+			encoding: "utf-8",
+		}).trim();
+
+		if (!changedFilesRaw) {
+			return { changedFiles: [], diff: "" };
+		}
+
+		const changedFiles: string[] = [];
+		for (const line of changedFilesRaw.split("\n")) {
+			const parts = line.split("\t");
+			if (parts.length >= 2) {
+				changedFiles.push(parts[parts.length - 1]);
+			}
+		}
+
+		if (changedFiles.length === 0) {
+			return { changedFiles: [], diff: "" };
+		}
+
+		// Generate full diff
+		const diffArgs = ["diff", "--no-color", fromTreeOID];
+		if (globPattern) {
+			diffArgs.push("--", globPattern);
+		}
+
+		let diff: string;
+		try {
+			diff = execFileSync("git", diffArgs, {
+				cwd: workspaceRoot,
+				stdio: "pipe",
+				encoding: "utf-8",
+			});
+		} catch (err) {
+			if (err instanceof Error && "stdout" in err) {
+				diff = (err as { stdout: string }).stdout ?? "";
+			} else {
+				diff = "";
+			}
+		}
+
+		return { changedFiles, diff };
+	} catch {
+		return { changedFiles: [], diff: "" };
 	}
 }
