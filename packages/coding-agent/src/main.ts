@@ -29,6 +29,7 @@ import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
+import { applyAgentModeToolPolicy } from "./core/modes.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
@@ -46,6 +47,7 @@ import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
+import { handleSessionsCommand } from "./sessions-cli.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
@@ -434,6 +436,20 @@ function buildSessionOptions(
 	if (parsed.excludeTools) {
 		options.excludeTools = [...parsed.excludeTools];
 	}
+	const agentMode = parsed.agentMode ?? settingsManager.getAgentMode();
+	if (agentMode) {
+		const modePolicy = applyAgentModeToolPolicy(
+			{
+				noTools: options.noTools,
+				tools: options.tools,
+				excludeTools: options.excludeTools,
+			},
+			agentMode,
+		);
+		options.noTools = modePolicy.noTools;
+		options.tools = modePolicy.tools;
+		options.excludeTools = modePolicy.excludeTools;
+	}
 
 	return { options, cliThinkingFromModel, diagnostics };
 }
@@ -489,6 +505,10 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (await handleConfigCommand(args, { extensionFactories: options?.extensionFactories })) {
 		return;
+	}
+
+	if (await handleSessionsCommand(args)) {
+		process.exit(process.exitCode ?? 0);
 	}
 
 	const parsed = parseArgs(args);
