@@ -13,7 +13,6 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
-import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type {
@@ -87,7 +86,7 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { classifyError, computeJitteredDelay } from "./permissions/error-classifier.ts";
-import { checkInputForGuardedPaths } from "./permissions/guarded-paths.ts";
+import { checkCwdSafeguard, checkInputForGuardedPaths } from "./permissions/guarded-paths.ts";
 import { evaluatePermission, type PermissionDecision, type PermissionRule } from "./permissions/permission-gate.ts";
 import { classifyPromptVariant } from "./prompt-family.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -98,7 +97,7 @@ import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./sess
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
-import { createSnapshot, isGitRepo } from "./snapshot.ts";
+import { createCheckpointId, createSnapshot, isGitRepo } from "./snapshot.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import {
@@ -113,12 +112,16 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts"
 import { createCheckpointChangesToolDefinition } from "./tools/checkpoint-changes.ts";
 import { createCodeReviewToolDefinition } from "./tools/code-review.ts";
 import { createFindFilesToolDefinition } from "./tools/find-files.ts";
+import { createFindSessionToolDefinition } from "./tools/find-session.ts";
+import { createHandoffToolDefinition } from "./tools/handoff.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createOracleToolDefinition } from "./tools/oracle.ts";
+import { createReadSessionToolDefinition } from "./tools/read-session.ts";
 import { createRestoreSnapshotToolDefinition } from "./tools/restore-snapshot.ts";
 import { createScratchpadLoadToolDefinition } from "./tools/scratchpad-load.ts";
 import { createScratchpadSaveToolDefinition } from "./tools/scratchpad-save.ts";
 import { createTaskToolDefinition } from "./tools/task.ts";
+import { createTaskListToolDefinition } from "./tools/task-list.ts";
 import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/tool-definition-wrapper.ts";
 
 // ============================================================================
@@ -553,6 +556,21 @@ export class AgentSession {
 			// Guarded path check: block mutating tools on sensitive paths
 			const mutatingTools = new Set(["edit", "write", "bash", "edit-diff", "restore_snapshot"]);
 			if (mutatingTools.has(toolCall.name)) {
+				const cwdSafeguard = checkCwdSafeguard(this._cwd);
+				if (!cwdSafeguard.safe) {
+					return {
+						immediateResult: {
+							content: [
+								{
+									type: "text" as const,
+									text: `[Permission Gate] Tool \`${toolCall.name}\` was blocked because ${cwdSafeguard.reason}. Start pi from a narrower project directory.`,
+								},
+							],
+							details: undefined,
+						},
+						isError: true,
+					};
+				}
 				const guardedPathResult = checkInputForGuardedPaths(input);
 				if (guardedPathResult) {
 					return {
@@ -1485,7 +1503,7 @@ export class AgentSession {
 		// Auto-snapshot: capture git tree state before the agent turn
 		const experimental = this.settingsManager.getExperimentalSettings();
 		if (experimental.autoSnapshot && isGitRepo(this._cwd)) {
-			const messageId = randomUUID();
+			const messageId = createCheckpointId("turn-start");
 			const treeOID = createSnapshot(this._cwd, this.sessionId, messageId);
 			if (!treeOID) {
 				// Snapshot creation failed; continue without blocking
@@ -1493,6 +1511,10 @@ export class AgentSession {
 		}
 
 		await this._runAgentPrompt(messages);
+
+		if (experimental.autoSnapshot && isGitRepo(this._cwd)) {
+			createSnapshot(this._cwd, this.sessionId, createCheckpointId("turn-end"));
+		}
 	}
 
 	/**
@@ -2727,8 +2749,11 @@ export class AgentSession {
 		const previousActiveToolNames = this.getActiveToolNames();
 		const allowedToolNames = this._allowedToolNames;
 		const excludedToolNames = this._excludedToolNames;
+		const builtinsAvailable = this._baseToolDefinitions.size > 0;
 		const isAllowedTool = (name: string): boolean =>
 			(!allowedToolNames || allowedToolNames.has(name)) && !excludedToolNames?.has(name);
+		const isAllowedBuiltinAddon = (name: string): boolean =>
+			builtinsAvailable && allowedToolNames !== undefined && allowedToolNames.has(name) && isAllowedTool(name);
 
 		const registeredTools = this._extensionRunner.getAllRegisteredTools();
 		const allCustomTools = [
@@ -2760,15 +2785,15 @@ export class AgentSession {
 		// Register restore_snapshot and checkpoint_changes tools when auto-snapshot is enabled
 		const experimental = this.settingsManager?.getExperimentalSettings();
 		this._snapshotEnabled = experimental?.autoSnapshot ?? false;
-		if (this._snapshotEnabled && isAllowedTool("restore_snapshot")) {
-			const snapshotToolDef = createRestoreSnapshotToolDefinition(this._cwd);
+		if (this._snapshotEnabled && isAllowedBuiltinAddon("restore_snapshot")) {
+			const snapshotToolDef = createRestoreSnapshotToolDefinition(this._cwd, this.sessionId);
 			const snapshotToolEntry: ToolDefinitionEntry = {
 				definition: snapshotToolDef,
 				sourceInfo: createSyntheticSourceInfo("<builtin:restore_snapshot>", { source: "builtin" }),
 			};
 			this._toolDefinitions.set("restore_snapshot", snapshotToolEntry);
 		}
-		if (this._snapshotEnabled && isAllowedTool("checkpoint_changes")) {
+		if (this._snapshotEnabled && isAllowedBuiltinAddon("checkpoint_changes")) {
 			const checkpointToolDef = createCheckpointChangesToolDefinition(this._cwd, this.sessionId);
 			const checkpointToolEntry: ToolDefinitionEntry = {
 				definition: checkpointToolDef,
@@ -2811,14 +2836,14 @@ export class AgentSession {
 		}
 
 		// Register restore_snapshot and checkpoint_changes agent tools when auto-snapshot is enabled
-		if (this._snapshotEnabled && isAllowedTool("restore_snapshot")) {
+		if (this._snapshotEnabled && isAllowedBuiltinAddon("restore_snapshot")) {
 			const snapshotEntry = this._toolDefinitions.get("restore_snapshot");
 			if (snapshotEntry) {
 				const wrappedSnapshotTool = wrapToolDefinition(snapshotEntry.definition, () => runner.createContext());
 				toolRegistry.set("restore_snapshot", wrappedSnapshotTool);
 			}
 		}
-		if (this._snapshotEnabled && isAllowedTool("checkpoint_changes")) {
+		if (this._snapshotEnabled && isAllowedBuiltinAddon("checkpoint_changes")) {
 			const checkpointEntry = this._toolDefinitions.get("checkpoint_changes");
 			if (checkpointEntry) {
 				const wrappedCheckpointTool = wrapToolDefinition(checkpointEntry.definition, () => runner.createContext());
@@ -2826,7 +2851,7 @@ export class AgentSession {
 			}
 		}
 		// Register scratchpad tools (always available)
-		if (isAllowedTool("scratchpad_save")) {
+		if (isAllowedBuiltinAddon("scratchpad_save")) {
 			const saveDef = createScratchpadSaveToolDefinition(this._scratchpad);
 			const saveEntry: ToolDefinitionEntry = {
 				definition: saveDef,
@@ -2838,7 +2863,7 @@ export class AgentSession {
 				wrapToolDefinition(saveDef, () => runner.createContext()),
 			);
 		}
-		if (isAllowedTool("scratchpad_load")) {
+		if (isAllowedBuiltinAddon("scratchpad_load")) {
 			const loadDef = createScratchpadLoadToolDefinition(this._scratchpad);
 			const loadEntry: ToolDefinitionEntry = {
 				definition: loadDef,
@@ -2848,6 +2873,51 @@ export class AgentSession {
 			toolRegistry.set(
 				"scratchpad_load",
 				wrapToolDefinition(loadDef, () => runner.createContext()),
+			);
+		}
+		if (isAllowedBuiltinAddon("task_list")) {
+			const taskListDef = createTaskListToolDefinition();
+			const taskListEntry: ToolDefinitionEntry = {
+				definition: taskListDef,
+				sourceInfo: createSyntheticSourceInfo("<builtin:task_list>", { source: "builtin" }),
+			};
+			this._toolDefinitions.set("task_list", taskListEntry);
+			toolRegistry.set(
+				"task_list",
+				wrapToolDefinition(taskListDef, () => runner.createContext()),
+			);
+		}
+		if (isAllowedBuiltinAddon("find_session")) {
+			const findSessionDef = createFindSessionToolDefinition();
+			this._toolDefinitions.set("find_session", {
+				definition: findSessionDef,
+				sourceInfo: createSyntheticSourceInfo("<builtin:find_session>", { source: "builtin" }),
+			});
+			toolRegistry.set(
+				"find_session",
+				wrapToolDefinition(findSessionDef, () => runner.createContext()),
+			);
+		}
+		if (isAllowedBuiltinAddon("read_session")) {
+			const readSessionDef = createReadSessionToolDefinition();
+			this._toolDefinitions.set("read_session", {
+				definition: readSessionDef,
+				sourceInfo: createSyntheticSourceInfo("<builtin:read_session>", { source: "builtin" }),
+			});
+			toolRegistry.set(
+				"read_session",
+				wrapToolDefinition(readSessionDef, () => runner.createContext()),
+			);
+		}
+		if (isAllowedBuiltinAddon("handoff")) {
+			const handoffDef = createHandoffToolDefinition(this._cwd);
+			this._toolDefinitions.set("handoff", {
+				definition: handoffDef,
+				sourceInfo: createSyntheticSourceInfo("<builtin:handoff>", { source: "builtin" }),
+			});
+			toolRegistry.set(
+				"handoff",
+				wrapToolDefinition(handoffDef, () => runner.createContext()),
 			);
 		}
 
@@ -2879,6 +2949,12 @@ export class AgentSession {
 					}
 					const mutatingTools = new Set(["edit", "write", "bash", "edit-diff"]);
 					if (mutatingTools.has(tool.name)) {
+						const cwdSafeguard = checkCwdSafeguard(this._cwd);
+						if (!cwdSafeguard.safe) {
+							throw new Error(
+								`[Permission Gate] Subagent tool \`${tool.name}\` blocked because ${cwdSafeguard.reason}.`,
+							);
+						}
 						const guardedPathResult = checkInputForGuardedPaths(input);
 						if (guardedPathResult) {
 							throw new Error(
@@ -2896,7 +2972,7 @@ export class AgentSession {
 			// The task subagent may delegate the full productive surface. Each tool's
 			// availability is still re-checked per call via delegatableToolNames.
 			const delegatableTaskTools = baseTools
-				.filter((t) => ["read", "grep", "find", "ls", "bash", "edit", "write"].includes(t.name))
+				.filter((t) => ["read", "grep", "find", "ls", "bash", "edit", "write", "task_list"].includes(t.name))
 				.map(toSubagentTool);
 
 			const registerSubagentTool = (name: string, definition: ToolDefinition): void => {
