@@ -86,7 +86,7 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { classifyError, computeJitteredDelay } from "./permissions/error-classifier.ts";
-import { checkCwdSafeguard, checkInputForGuardedPaths } from "./permissions/guarded-paths.ts";
+import { checkInputForGuardedPaths } from "./permissions/guarded-paths.ts";
 import { evaluatePermission, type PermissionDecision, type PermissionRule } from "./permissions/permission-gate.ts";
 import { classifyPromptVariant } from "./prompt-family.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -100,14 +100,6 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createCheckpointId, createSnapshot, isGitRepo } from "./snapshot.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
-import {
-	createThinkingGovernorState,
-	DEFAULT_THINKING_LIMITS,
-	feedThinkingDelta,
-	generateOverthinkingFeedback,
-	isOverthinking,
-	type ThinkingGovernorState,
-} from "./thinking-governor.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createCheckpointChangesToolDefinition } from "./tools/checkpoint-changes.ts";
 import { createCodeReviewToolDefinition } from "./tools/code-review.ts";
@@ -388,9 +380,6 @@ export class AgentSession {
 	// Guidance discovery state (Phase 2)
 	private _touchedFiles: Set<string> = new Set();
 
-	// Magnitude-style thinking governor state (reset each turn)
-	private _thinkingGovernorState: ThinkingGovernorState | undefined;
-
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
@@ -556,21 +545,6 @@ export class AgentSession {
 			// Guarded path check: block mutating tools on sensitive paths
 			const mutatingTools = new Set(["edit", "write", "bash", "edit-diff", "restore_snapshot"]);
 			if (mutatingTools.has(toolCall.name)) {
-				const cwdSafeguard = checkCwdSafeguard(this._cwd);
-				if (!cwdSafeguard.safe) {
-					return {
-						immediateResult: {
-							content: [
-								{
-									type: "text" as const,
-									text: `[Permission Gate] Tool \`${toolCall.name}\` was blocked because ${cwdSafeguard.reason}. Start pi from a narrower project directory.`,
-								},
-							],
-							details: undefined,
-						},
-						isError: true,
-					};
-				}
 				const guardedPathResult = checkInputForGuardedPaths(input);
 				if (guardedPathResult) {
 					return {
@@ -732,21 +706,6 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
-		// Reset thinking governor at the start of each assistant turn so budgets
-		// are tracked per turn.
-		if (event.type === "turn_start") {
-			this._resetThinkingGovernor();
-		}
-
-		// Feed thinking deltas to the Magnitude-style governor.
-		if (
-			event.type === "message_update" &&
-			event.assistantMessageEvent?.type === "thinking_delta" &&
-			event.assistantMessageEvent.delta
-		) {
-			await this._feedThinkingDelta(event.assistantMessageEvent.delta);
-		}
-
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -1987,61 +1946,6 @@ export class AgentSession {
 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
 	}
 
-	/**
-	 * Determine the thinking-governor mode from current session state.
-	 * This is a temporary heuristic until tool modes are fully integrated;
-	 * low/minimal thinking maps to the fast budget, medium/high/default to the
-	 * full budget, and unknown states fall back to the largest budget.
-	 */
-	private _getThinkingGovernorMode(): "full" | "fast" | "fallback" {
-		switch (this.thinkingLevel) {
-			case "minimal":
-			case "low":
-				return "fast";
-			case "medium":
-			case "high":
-			case "xhigh":
-				return "full";
-			default:
-				return this.supportsThinking() ? "full" : "fallback";
-		}
-	}
-
-	/**
-	 * Reset the thinking governor state for a new turn.
-	 */
-	private _resetThinkingGovernor(): void {
-		this._thinkingGovernorState = createThinkingGovernorState(
-			DEFAULT_THINKING_LIMITS,
-			this._getThinkingGovernorMode(),
-		);
-	}
-
-	/**
-	 * Feed a thinking_delta string to the governor and inject overthinking
-	 * feedback if the budget is newly exceeded. The feedback is queued as a
-	 * steering message so the model sees it before its next response without
-	 * losing in-flight tool results.
-	 */
-	private async _feedThinkingDelta(deltaText: string): Promise<void> {
-		if (!this._thinkingGovernorState) {
-			this._resetThinkingGovernor();
-		}
-
-		const result = feedThinkingDelta(this._thinkingGovernorState!, deltaText);
-		this._thinkingGovernorState = result.state;
-
-		if (result.newlyExceeded) {
-			const feedback = generateOverthinkingFeedback(result.state);
-			await this._queueSteer(feedback);
-		} else if (isOverthinking(deltaText)) {
-			await this._queueSteer(
-				"[Thinking Governor] Your reasoning appears to be looping without grounding in tool observations. " +
-					"Call a tool to gather evidence, or commit to a decision and act.",
-			);
-		}
-	}
-
 	// =========================================================================
 	// Queue Mode Management
 	// =========================================================================
@@ -2949,12 +2853,6 @@ export class AgentSession {
 					}
 					const mutatingTools = new Set(["edit", "write", "bash", "edit-diff"]);
 					if (mutatingTools.has(tool.name)) {
-						const cwdSafeguard = checkCwdSafeguard(this._cwd);
-						if (!cwdSafeguard.safe) {
-							throw new Error(
-								`[Permission Gate] Subagent tool \`${tool.name}\` blocked because ${cwdSafeguard.reason}.`,
-							);
-						}
 						const guardedPathResult = checkInputForGuardedPaths(input);
 						if (guardedPathResult) {
 							throw new Error(

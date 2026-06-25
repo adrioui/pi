@@ -15,8 +15,8 @@ describe("guarded-paths", () => {
 			expect(GUARDED_PATH_PATTERNS).toContain("**/.env*");
 		});
 
-		it("includes git internals", () => {
-			expect(GUARDED_PATH_PATTERNS).toContain("**/.git/**");
+		it("does not include git internals", () => {
+			expect(GUARDED_PATH_PATTERNS).not.toContain("**/.git/**");
 		});
 
 		it("includes SSH configs", () => {
@@ -65,15 +65,14 @@ describe("guarded-paths", () => {
 			expect(result).not.toBeNull();
 		});
 
-		it("detects .git internals", () => {
+		it("does not guard .git internals", () => {
 			const result = isGuardedPath("/home/user/repo/.git/config");
-			expect(result).not.toBeNull();
-			expect(result!.pattern).toBe("**/.git/**");
+			expect(result).toBeNull();
 		});
 
-		it("detects nested .git objects", () => {
+		it("does not guard nested .git objects", () => {
 			const result = isGuardedPath("/home/user/repo/.git/objects/ab/12345");
-			expect(result).not.toBeNull();
+			expect(result).toBeNull();
 		});
 
 		it("detects SSH configs", () => {

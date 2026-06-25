@@ -5,12 +5,17 @@
 ### Added
 
 - Added Amp/Magnitude-inspired task-list, handoff, and cross-session lookup tools for coding-agent sessions.
-- Added Claude/Agents-compatible skill root discovery and Magnitude-style thinking-role budgets, shell safety tiers, CWD safeguards, and permission delegation.
+- Added Claude/Agents-compatible skill root discovery, shell safety tiers, and permission delegation.
 - Added `pi sessions search/export`, `--agent-mode` tool presets, before/after tool hook aliases, and selector-based checkpoint restore/diff support.
 
 ### Fixed
 
 - Replaced unsafe shell-string git calls and several `any` type bypasses in coding-agent tool and context-firewall code.
+- Stopped treating normal git operations such as `commit`, `push`, `merge`, and `rebase` as forbidden shell commands while preserving blocks for destructive variants.
+
+### Removed
+
+- Removed thinking-governor steering, CWD safeguards, context-firewall task injection, and default guarding of `.git/**` paths.
 
 ## [0.80.2] - 2026-06-23
 

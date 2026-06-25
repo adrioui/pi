@@ -39,7 +39,7 @@ const READONLY_COMMANDS = new Set([
 
 const GIT_READONLY = new Set(["status", "log", "diff", "show", "rev-parse"]);
 const GIT_UNSAFE_FLAGS = new Set(["--output", "--ext-diff", "--textconv", "--exec", "--paginate"]);
-const GIT_FORBIDDEN = new Set(["clean", "commit", "merge", "push", "rebase", "reset", "stash"]);
+const GIT_FORBIDDEN = new Set(["stash"]);
 const KUBECTL_FORBIDDEN = new Set([
 	"apply",
 	"create",
@@ -252,6 +252,20 @@ function hasSensitiveMount(args: string[]): boolean {
 	});
 }
 
+function gitCleanDeletesDirectories(args: string[]): boolean {
+	let hasForce = false;
+	let hasDirectory = false;
+	for (const arg of args) {
+		if (arg === "--force" || arg === "-f" || (/^-[A-Za-z]+$/.test(arg) && arg.includes("f"))) {
+			hasForce = true;
+		}
+		if (arg === "-d" || (/^-[A-Za-z]+$/.test(arg) && arg.includes("d"))) {
+			hasDirectory = true;
+		}
+	}
+	return hasForce && hasDirectory;
+}
+
 function classifyGit(args: string[]): ShellClassification | undefined {
 	if (
 		args.includes("-c") ||
@@ -267,6 +281,21 @@ function classifyGit(args: string[]): ShellClassification | undefined {
 	}
 	if (GIT_FORBIDDEN.has(subcommand)) {
 		return { level: "forbidden", reason: `Destructive git ${subcommand} can mutate repository state` };
+	}
+	if (subcommand === "add" && (args.includes("-A") || args.includes("--all") || args.includes("."))) {
+		return { level: "forbidden", reason: "git add all paths is blocked" };
+	}
+	if (subcommand === "commit" && args.includes("--no-verify")) {
+		return { level: "forbidden", reason: "git commit --no-verify bypasses repository checks" };
+	}
+	if (subcommand === "push" && args.some((arg) => arg === "-f" || arg === "--force" || arg === "--force-with-lease")) {
+		return { level: "forbidden", reason: "git force push can overwrite remote history" };
+	}
+	if (subcommand === "reset" && args.includes("--hard")) {
+		return { level: "forbidden", reason: "git reset --hard can discard uncommitted changes" };
+	}
+	if (subcommand === "clean" && gitCleanDeletesDirectories(args)) {
+		return { level: "forbidden", reason: "git clean -fd can delete untracked files and directories" };
 	}
 	// Destructive git restore: `git restore .` or `git restore -- <paths>`
 	if (subcommand === "restore" && (args.includes(".") || args.includes("--"))) {
@@ -417,9 +446,6 @@ function classifySegment(segment: ShellCommandSegment): ShellClassification {
 			const nestedResult = classifyShellCommand(nested.replace(/^["']|["']$/g, ""));
 			return { ...nestedResult, reason: `${name} -c wraps ${nestedResult.reason}`, command: segment };
 		}
-	}
-	if (SHELL_INTERPRETERS.has(name) && segment.separatorBefore === "|") {
-		return { level: "forbidden", reason: "piping commands into a shell is blocked", command: segment };
 	}
 	// Guard against recursive rm of root/home with any flag variant:
 	// -rf, -fr, -Rf, -fR, -r, -R, --recursive, plus -f or --force

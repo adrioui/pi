@@ -5,9 +5,6 @@
  * of general tool permission rules.
  */
 
-import { homedir } from "node:os";
-import { resolve, sep } from "node:path";
-
 /**
  * Guarded path patterns (glob-style).
  * These paths are protected from mutation by default.
@@ -15,10 +12,6 @@ import { resolve, sep } from "node:path";
 export const GUARDED_PATH_PATTERNS: readonly string[] = [
 	// Environment files
 	"**/.env*",
-
-	// Git internals
-	"**/.git",
-	"**/.git/**",
 
 	// SSH configuration
 	"**/.ssh",
@@ -62,31 +55,6 @@ export interface GuardedPathMatch {
 	pattern: string;
 	/** Whether the path is guarded against mutation. */
 	isGuarded: boolean;
-}
-
-export interface CwdSafeguardResult {
-	safe: boolean;
-	reason?: string;
-}
-
-function isSameOrParent(parent: string, child: string): boolean {
-	if (parent === child) {
-		return true;
-	}
-	const prefix = parent.endsWith(sep) ? parent : `${parent}${sep}`;
-	return child.startsWith(prefix);
-}
-
-export function checkCwdSafeguard(cwd: string, homeDir = homedir()): CwdSafeguardResult {
-	const resolvedCwd = resolve(cwd);
-	const resolvedHome = resolve(homeDir);
-	if (resolvedCwd === resolvedHome) {
-		return { safe: false, reason: "cwd is the home directory" };
-	}
-	if (isSameOrParent(resolvedCwd, resolvedHome)) {
-		return { safe: false, reason: "cwd is broader than the home directory" };
-	}
-	return { safe: true };
 }
 
 /**

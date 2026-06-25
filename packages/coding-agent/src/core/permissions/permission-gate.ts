@@ -207,8 +207,20 @@ const BUILT_IN_RULES: PermissionRule[] = [
 	{
 		tool: "bash",
 		action: "reject",
-		matches: { command: "/git clean -fd/" },
+		matches: { command: "/git clean .*-(?:[^\\s]*f[^\\s]*d|[^\\s]*d[^\\s]*f)/" },
 		message: "Destructive git clean blocked",
+	},
+	{
+		tool: "bash",
+		action: "reject",
+		matches: { command: "/git commit .*--no-verify/" },
+		message: "Bypassing git commit hooks is blocked",
+	},
+	{
+		tool: "bash",
+		action: "reject",
+		matches: { command: "/git push .*(?:-f|--force|--force-with-lease)/" },
+		message: "Destructive git push blocked",
 	},
 	{ tool: "bash", action: "reject", matches: { command: "/git stash/" }, message: "Destructive git stash blocked" },
 	{ tool: "bash", action: "reject", matches: { command: "/git add -A/" }, message: "Destructive git add blocked" },
@@ -216,8 +228,6 @@ const BUILT_IN_RULES: PermissionRule[] = [
 	{ tool: "bash", action: "reject", matches: { command: "/rm -rf \\//" }, message: "Recursive rm blocked" },
 	{ tool: "bash", action: "reject", matches: { command: "/rm -rf ~/" }, message: "Recursive rm blocked" },
 	{ tool: "bash", action: "reject", matches: { command: "/chmod -R 777/" }, message: "Permissive chmod blocked" },
-	{ tool: "bash", action: "reject", matches: { command: "/\\| bash/" }, message: "Piped command blocked" },
-	{ tool: "bash", action: "reject", matches: { command: "/\\| sh/" }, message: "Piped command blocked" },
 
 	// Allow mutating file tools (guarded-path policy blocks sensitive targets)
 	{ tool: "write", action: "allow" },
