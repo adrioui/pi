@@ -812,7 +812,7 @@ export type InputEventResult =
 // ============================================================================
 
 interface ToolCallEventBase {
-	type: "tool_call";
+	type: "tool_call" | "before_tool_call";
 	toolCallId: string;
 }
 
@@ -873,7 +873,7 @@ export type ToolCallEvent =
 	| CustomToolCallEvent;
 
 interface ToolResultEventBase {
-	type: "tool_result";
+	type: "tool_result" | "after_tool_call";
 	toolCallId: string;
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
@@ -1202,7 +1202,15 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult | ToolCallMiddlewareResult>,
 	): void;
 	on(
+		event: "before_tool_call",
+		handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult | ToolCallMiddlewareResult>,
+	): void;
+	on(
 		event: "tool_result",
+		handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult | ToolResultMiddlewareResult>,
+	): void;
+	on(
+		event: "after_tool_call",
 		handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult | ToolResultMiddlewareResult>,
 	): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;

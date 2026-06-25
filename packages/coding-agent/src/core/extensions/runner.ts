@@ -814,80 +814,83 @@ export class ExtensionRunner {
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
 
-		for (const ext of this.extensions) {
-			const handlers = ext.handlers.get("tool_result");
-			if (!handlers || handlers.length === 0) continue;
+		for (const eventName of ["tool_result", "after_tool_call"] as const) {
+			currentEvent.type = eventName;
+			for (const ext of this.extensions) {
+				const handlers = ext.handlers.get(eventName);
+				if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
-				try {
-					const handlerResult = await handler(currentEvent, ctx);
-					if (!handlerResult) continue;
+				for (const handler of handlers) {
+					try {
+						const handlerResult = await handler(currentEvent, ctx);
+						if (!handlerResult) continue;
 
-					// Check if this is a middleware-style result (has action property)
-					const anyResult = handlerResult as Record<string, unknown>;
-					if (typeof anyResult.action === "string") {
-						switch (anyResult.action) {
-							case "allow":
-								// Continue to next handler with current (possibly mutated) values
-								break;
-							case "modify":
-								if (anyResult.content !== undefined) {
-									currentEvent.content = anyResult.content as (TextContent | ImageContent)[];
+						// Check if this is a middleware-style result (has action property)
+						const anyResult = handlerResult as Record<string, unknown>;
+						if (typeof anyResult.action === "string") {
+							switch (anyResult.action) {
+								case "allow":
+									// Continue to next handler with current (possibly mutated) values
+									break;
+								case "modify":
+									if (anyResult.content !== undefined) {
+										currentEvent.content = anyResult.content as (TextContent | ImageContent)[];
+										modified = true;
+									}
+									if (anyResult.details !== undefined) {
+										currentEvent.details = anyResult.details;
+										modified = true;
+									}
+									if (anyResult.isError !== undefined) {
+										currentEvent.isError = !!anyResult.isError;
+										modified = true;
+									}
+									break;
+								case "reject":
+									currentEvent.isError = true;
+									currentEvent.content = [
+										{
+											type: "text" as const,
+											text:
+												typeof anyResult.reason === "string"
+													? anyResult.reason
+													: "Tool result was rejected by extension",
+										},
+									];
 									modified = true;
-								}
-								if (anyResult.details !== undefined) {
-									currentEvent.details = anyResult.details;
-									modified = true;
-								}
-								if (anyResult.isError !== undefined) {
-									currentEvent.isError = !!anyResult.isError;
-									modified = true;
-								}
-								break;
-							case "reject":
-								currentEvent.isError = true;
-								currentEvent.content = [
-									{
-										type: "text" as const,
-										text:
-											typeof anyResult.reason === "string"
-												? anyResult.reason
-												: "Tool result was rejected by extension",
-									},
-								];
-								modified = true;
-								return {
-									content: currentEvent.content,
-									details: currentEvent.details,
-									isError: currentEvent.isError,
-								};
+									return {
+										content: currentEvent.content,
+										details: currentEvent.details,
+										isError: currentEvent.isError,
+									};
+							}
+							continue;
 						}
-						continue;
-					}
 
-					// Legacy ToolResultEventResult
-					const legacyResult = handlerResult as ToolResultEventResult;
-					if (legacyResult.content !== undefined) {
-						currentEvent.content = legacyResult.content;
-						modified = true;
+						// Legacy ToolResultEventResult
+						const legacyResult = handlerResult as ToolResultEventResult;
+						if (legacyResult.content !== undefined) {
+							currentEvent.content = legacyResult.content;
+							modified = true;
+						}
+						if (legacyResult.details !== undefined) {
+							currentEvent.details = legacyResult.details;
+							modified = true;
+						}
+						if (legacyResult.isError !== undefined) {
+							currentEvent.isError = legacyResult.isError;
+							modified = true;
+						}
+					} catch (err) {
+						const message = err instanceof Error ? err.message : String(err);
+						const stack = err instanceof Error ? err.stack : undefined;
+						this.emitError({
+							extensionPath: ext.path,
+							event: eventName,
+							error: message,
+							stack,
+						});
 					}
-					if (legacyResult.details !== undefined) {
-						currentEvent.details = legacyResult.details;
-						modified = true;
-					}
-					if (legacyResult.isError !== undefined) {
-						currentEvent.isError = legacyResult.isError;
-						modified = true;
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "tool_result",
-						error: message,
-						stack,
-					});
 				}
 			}
 		}
@@ -907,63 +910,66 @@ export class ExtensionRunner {
 		const ctx = this.createContext();
 		let result: ToolCallEventResult | undefined;
 
-		for (const ext of this.extensions) {
-			const handlers = ext.handlers.get("tool_call");
-			if (!handlers || handlers.length === 0) continue;
+		for (const eventName of ["before_tool_call", "tool_call"] as const) {
+			event.type = eventName;
+			for (const ext of this.extensions) {
+				const handlers = ext.handlers.get(eventName);
+				if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
-				const handlerResult = await handler(event, ctx);
+				for (const handler of handlers) {
+					const handlerResult = await handler(event, ctx);
 
-				if (!handlerResult) continue;
+					if (!handlerResult) continue;
 
-				// Check if this is a middleware-style result (has action property)
-				const anyResult = handlerResult as Record<string, unknown>;
-				if (typeof anyResult.action === "string") {
-					switch (anyResult.action) {
-						case "allow":
-							// Continue to next handler with current (possibly mutated) event
-							break;
-						case "modify":
-							// Copy modified args into event.input in place so the original
-							// reference (shared with beforeToolCall's args) reflects the changes.
-							if (anyResult.args && typeof anyResult.args === "object") {
-								const modifiedArgs = anyResult.args as Record<string, unknown>;
-								const input = event.input as Record<string, unknown>;
-								// Clear existing keys
-								for (const key of Object.keys(input)) {
-									delete input[key];
+					// Check if this is a middleware-style result (has action property)
+					const anyResult = handlerResult as Record<string, unknown>;
+					if (typeof anyResult.action === "string") {
+						switch (anyResult.action) {
+							case "allow":
+								// Continue to next handler with current (possibly mutated) event
+								break;
+							case "modify":
+								// Copy modified args into event.input in place so the original
+								// reference (shared with beforeToolCall's args) reflects the changes.
+								if (anyResult.args && typeof anyResult.args === "object") {
+									const modifiedArgs = anyResult.args as Record<string, unknown>;
+									const input = event.input as Record<string, unknown>;
+									// Clear existing keys
+									for (const key of Object.keys(input)) {
+										delete input[key];
+									}
+									// Copy new keys
+									for (const [key, value] of Object.entries(modifiedArgs)) {
+										input[key] = value;
+									}
 								}
-								// Copy new keys
-								for (const [key, value] of Object.entries(modifiedArgs)) {
-									input[key] = value;
-								}
-							}
-							break;
-						case "synthesize":
-							// Return immediately with synthesized result
-							return {
-								block: true,
-								reason: "synthesized",
-								synthesizeResult: (anyResult as Record<string, unknown>)
-									.result as ToolCallEventResult["synthesizeResult"],
-								synthesizeIsError: !!anyResult.isError,
-							} as ToolCallEventResult;
-						case "reject":
-							return {
-								block: true,
-								reason:
-									typeof anyResult.reason === "string"
-										? anyResult.reason
-										: "Tool call was rejected by extension",
-							} as ToolCallEventResult;
+								break;
+							case "synthesize":
+								// Return immediately with synthesized result
+								return {
+									block: true,
+									reason: "synthesized",
+									synthesizeResult: (anyResult as Record<string, unknown>)
+										.result as ToolCallEventResult["synthesizeResult"],
+									synthesizeIsError: !!anyResult.isError,
+								} as ToolCallEventResult;
+							case "reject":
+								return {
+									block: true,
+									reason:
+										typeof anyResult.reason === "string"
+											? anyResult.reason
+											: "Tool call was rejected by extension",
+								} as ToolCallEventResult;
+						}
+						continue;
 					}
-					continue;
-				}
 
-				// Legacy ToolCallEventResult
-				result = handlerResult as ToolCallEventResult;
-				if (result.block) {
-					return result;
+					// Legacy ToolCallEventResult
+					result = handlerResult as ToolCallEventResult;
+					if (result.block) {
+						return result;
+					}
 				}
 			}
 		}
