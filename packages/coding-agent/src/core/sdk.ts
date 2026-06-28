@@ -1,5 +1,13 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, type ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type {
+	Api,
+	AssistantMessage,
+	AssistantMessageEvent,
+	AssistantMessageEventStream,
+	Context,
+} from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -9,6 +17,7 @@ import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
+import type { ProviderApiKeyResolver } from "./model-registry.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import type { PermissionDecision, PermissionRule } from "./permissions/permission-gate.ts";
@@ -31,6 +40,8 @@ import {
 	type ToolName,
 	withFileMutationQueue,
 } from "./tools/index.ts";
+
+const AUTH_RETRY_STEPS = [false, true] as const;
 
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
@@ -135,6 +146,149 @@ export {
 
 function getDefaultAgentDir(): string {
 	return getAgentDir();
+}
+
+type StreamSimpleFn = typeof streamSimple;
+
+function emitBufferedEvents(stream: AssistantMessageEventStream, events: AssistantMessageEvent[]): void {
+	for (const event of events) {
+		stream.push(event);
+	}
+}
+
+function createProviderError(error: AssistantMessage): Error {
+	return new Error(error.errorMessage ?? "Provider returned an error");
+}
+
+export function streamSimpleWithApiKeyResolver(
+	model: Model<Api>,
+	context: Context,
+	options: Parameters<StreamSimpleFn>[2],
+	apiKeyResolver: ProviderApiKeyResolver,
+	streamSimpleFn: StreamSimpleFn = streamSimple,
+): AssistantMessageEventStream {
+	const outer = createAssistantMessageEventStream();
+	const signal = options?.signal;
+
+	const runAttempt = async (
+		apiKey: string,
+		captureAuthFailure: boolean,
+	): Promise<
+		{ error: unknown; bufferedEvents: AssistantMessageEvent[]; terminalEvent?: AssistantMessageEvent } | undefined
+	> => {
+		const bufferedEvents: AssistantMessageEvent[] = [];
+		let emittedReplayUnsafeEvent = false;
+		const flushBuffered = (): void => {
+			emitBufferedEvents(outer, bufferedEvents);
+			bufferedEvents.length = 0;
+		};
+
+		try {
+			const inner = streamSimpleFn(model, context, { ...options, apiKey });
+			for await (const event of inner) {
+				if (!emittedReplayUnsafeEvent && event.type === "start") {
+					bufferedEvents.push(event);
+					continue;
+				}
+				if (!emittedReplayUnsafeEvent && captureAuthFailure && event.type === "error") {
+					return { error: createProviderError(event.error), bufferedEvents, terminalEvent: event };
+				}
+				flushBuffered();
+				emittedReplayUnsafeEvent = true;
+				outer.push(event);
+			}
+			flushBuffered();
+			outer.end(await inner.result());
+		} catch (error) {
+			if (!emittedReplayUnsafeEvent && captureAuthFailure) {
+				return { error, bufferedEvents };
+			}
+			flushBuffered();
+			const message: AssistantMessage = {
+				role: "assistant",
+				content: [],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "error",
+				errorMessage: error instanceof Error ? error.message : String(error),
+				timestamp: Date.now(),
+			};
+			outer.push({ type: "error", reason: "error", error: message });
+		}
+		return undefined;
+	};
+
+	const emitFailure = (failure: {
+		error: unknown;
+		bufferedEvents: AssistantMessageEvent[];
+		terminalEvent?: AssistantMessageEvent;
+	}): void => {
+		emitBufferedEvents(outer, failure.bufferedEvents);
+		if (failure.terminalEvent) {
+			outer.push(failure.terminalEvent);
+			return;
+		}
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage: failure.error instanceof Error ? failure.error.message : String(failure.error),
+			timestamp: Date.now(),
+		};
+		outer.push({ type: "error", reason: "error", error: message });
+	};
+
+	void (async () => {
+		let lastKey: string | undefined;
+		try {
+			lastKey = await apiKeyResolver({ lastChance: false, error: undefined, signal });
+		} catch (error) {
+			emitFailure({ error, bufferedEvents: [] });
+			return;
+		}
+		if (!lastKey) {
+			emitFailure({ error: new Error(`No API key found for "${model.provider}"`), bufferedEvents: [] });
+			return;
+		}
+
+		let failure = await runAttempt(lastKey, true);
+		if (!failure) return;
+
+		for (let step = 0; step < AUTH_RETRY_STEPS.length; step++) {
+			if (signal?.aborted) break;
+			const nextKey = await apiKeyResolver({ lastChance: AUTH_RETRY_STEPS[step], error: failure.error, signal });
+			if (!nextKey || nextKey === lastKey) continue;
+			lastKey = nextKey;
+			const isLastStep = step === AUTH_RETRY_STEPS.length - 1;
+			const next = await runAttempt(nextKey, !isLastStep);
+			if (!next) return;
+			failure = next;
+		}
+
+		emitFailure(failure);
+	})();
+
+	return outer;
 }
 
 /**
@@ -321,7 +475,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const timeoutMs = options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs;
 			const websocketConnectTimeoutMs =
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
-			const response = streamSimple(model, context, {
+			const streamOptions = {
 				...options,
 				apiKey: auth.apiKey,
 				env,
@@ -336,17 +490,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					auth.headers,
 					options?.headers,
 				),
-			});
+			};
+			const response = auth.apiKeyResolver
+				? streamSimpleWithApiKeyResolver(model, context, streamOptions, auth.apiKeyResolver)
+				: streamSimple(model, context, streamOptions);
 			void response.result().then(
 				(message) => {
 					modelRegistry.recordProviderApiKeyResult(
-						auth.apiKeySelection,
+						auth.apiKeyResolver?.getSelection() ?? auth.apiKeySelection,
 						message.stopReason === "error" ? (message.errorMessage ?? "Provider returned an error") : undefined,
 					);
 				},
 				(error) => {
 					modelRegistry.recordProviderApiKeyResult(
-						auth.apiKeySelection,
+						auth.apiKeyResolver?.getSelection() ?? auth.apiKeySelection,
 						error instanceof Error ? error.message : String(error),
 					);
 				},

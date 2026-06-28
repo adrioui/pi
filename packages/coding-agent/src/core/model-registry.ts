@@ -256,10 +256,22 @@ export interface ProviderApiKeySelection {
 	count: number;
 }
 
+export interface ApiKeyResolveContext {
+	lastChance: boolean;
+	error: unknown;
+	signal?: AbortSignal;
+}
+
+export interface ProviderApiKeyResolver {
+	(ctx: ApiKeyResolveContext): Promise<string | undefined> | string | undefined;
+	getSelection(): ProviderApiKeySelection | undefined;
+}
+
 export type ResolvedRequestAuth =
 	| {
 			ok: true;
 			apiKey?: string;
+			apiKeyResolver?: ProviderApiKeyResolver;
 			headers?: Record<string, string>;
 			env?: Record<string, string>;
 			apiKeySelection?: ProviderApiKeySelection;
@@ -752,7 +764,7 @@ export class ModelRegistry {
 		const now = Date.now();
 		const start = state.nextIndex % resolved.length;
 
-		let selected = availableIndexes[0];
+		let selected: { apiKey: string; index: number } | undefined;
 		for (let offset = 0; offset < resolved.length; offset++) {
 			const index = (start + offset) % resolved.length;
 			const apiKey = resolved[index];
@@ -764,11 +776,56 @@ export class ModelRegistry {
 			}
 		}
 
+		if (!selected) return undefined;
 		state.nextIndex = (selected.index + 1) % resolved.length;
 		return {
 			apiKey: selected.apiKey,
 			selection: { provider, index: selected.index, count: resolved.length },
 		};
+	}
+
+	private createProviderApiKeyResolver(
+		provider: string,
+		apiKeys: string[] | undefined,
+		providerEnv: Record<string, string> | undefined,
+		resolveValue: (config: string, env?: Record<string, string>) => string | undefined = resolveConfigValue,
+		seed?: { apiKey: string; selection: ProviderApiKeySelection },
+	): ProviderApiKeyResolver | undefined {
+		if (!apiKeys || apiKeys.length < 2) return undefined;
+
+		let currentSelection: ProviderApiKeySelection | undefined = seed?.selection;
+		let seedPending = seed !== undefined;
+		const resolver = ((ctx: ApiKeyResolveContext): string | undefined => {
+			if (seedPending && ctx.error === undefined) {
+				seedPending = false;
+				return seed?.apiKey;
+			}
+
+			const classification =
+				ctx.error === undefined
+					? undefined
+					: classifyError(ctx.error instanceof Error ? ctx.error.message : String(ctx.error));
+			if (ctx.error !== undefined && currentSelection) {
+				this.recordProviderApiKeyResult(
+					currentSelection,
+					ctx.error instanceof Error ? ctx.error.message : String(ctx.error),
+				);
+			}
+
+			if (classification && !this.shouldRetryProviderApiKeyFailure(provider, classification.category)) {
+				return undefined;
+			}
+
+			if (ctx.error !== undefined && !ctx.lastChance) {
+				return undefined;
+			}
+
+			const selected = this.resolveProviderApiKeys(provider, apiKeys, providerEnv, resolveValue);
+			currentSelection = selected?.selection;
+			return selected?.apiKey;
+		}) as ProviderApiKeyResolver;
+		resolver.getSelection = () => currentSelection;
+		return resolver;
 	}
 
 	recordProviderApiKeyResult(selection: ProviderApiKeySelection | undefined, error: string | undefined): void {
@@ -807,6 +864,7 @@ export class ModelRegistry {
 	}
 
 	private getApiKeyCooldownMs(category: ErrorCategory, retryable: boolean): number {
+		if (category === "rate_limited") return 0;
 		if (retryable) return TRANSIENT_API_KEY_COOLDOWN_MS;
 		if (category === "auth" || category === "quota" || category === "permission_denied") {
 			return LONG_API_KEY_COOLDOWN_MS;
@@ -818,7 +876,6 @@ export class ModelRegistry {
 		return (
 			category === "timeout" ||
 			category === "network" ||
-			category === "rate_limited" ||
 			category === "server_error" ||
 			category === "auth" ||
 			category === "quota" ||
@@ -836,21 +893,42 @@ export class ModelRegistry {
 			const runtimeApiKey = this.authStorage.getRuntimeApiKey(model.provider);
 			const storedCredential = this.authStorage.get(model.provider);
 			let apiKey = runtimeApiKey;
+			let apiKeyResolver: ProviderApiKeyResolver | undefined;
 			let apiKeySelection: ProviderApiKeySelection | undefined;
 
 			if (apiKey === undefined && storedCredential?.type === "api_key") {
 				if (storedCredential.key) {
 					apiKey = resolveConfigValue(storedCredential.key, storedCredential.env);
 				} else if (storedCredential.keys) {
-					const selected = this.resolveProviderApiKeys(
-						model.provider,
-						storedCredential.keys,
-						storedCredential.env,
-						resolveConfigValue,
-					);
-					if (selected) {
-						apiKey = selected.apiKey;
-						apiKeySelection = selected.selection;
+					if (providerConfig?.authHeader) {
+						const selected = this.resolveProviderApiKeys(
+							model.provider,
+							storedCredential.keys,
+							storedCredential.env,
+							resolveConfigValue,
+						);
+						if (selected) {
+							apiKey = selected.apiKey;
+							apiKeySelection = selected.selection;
+						}
+					} else {
+						const selected = this.resolveProviderApiKeys(
+							model.provider,
+							storedCredential.keys,
+							storedCredential.env,
+							resolveConfigValue,
+						);
+						if (selected) {
+							apiKey = selected.apiKey;
+							apiKeySelection = selected.selection;
+						}
+						apiKeyResolver = this.createProviderApiKeyResolver(
+							model.provider,
+							storedCredential.keys,
+							storedCredential.env,
+							resolveConfigValue,
+							selected,
+						);
 					}
 				}
 			}
@@ -867,11 +945,26 @@ export class ModelRegistry {
 				);
 			}
 
-			if (apiKey === undefined && providerConfig?.apiKeys) {
-				const selected = this.resolveProviderApiKeys(model.provider, providerConfig.apiKeys, providerEnv);
-				if (selected) {
-					apiKey = selected.apiKey;
-					apiKeySelection = selected.selection;
+			if (apiKey === undefined && !apiKeyResolver && providerConfig?.apiKeys) {
+				if (providerConfig.authHeader) {
+					const selected = this.resolveProviderApiKeys(model.provider, providerConfig.apiKeys, providerEnv);
+					if (selected) {
+						apiKey = selected.apiKey;
+						apiKeySelection = selected.selection;
+					}
+				} else {
+					const selected = this.resolveProviderApiKeys(model.provider, providerConfig.apiKeys, providerEnv);
+					if (selected) {
+						apiKey = selected.apiKey;
+						apiKeySelection = selected.selection;
+					}
+					apiKeyResolver = this.createProviderApiKeyResolver(
+						model.provider,
+						providerConfig.apiKeys,
+						providerEnv,
+						resolveConfigValue,
+						selected,
+					);
 				}
 			}
 
@@ -901,6 +994,7 @@ export class ModelRegistry {
 			return {
 				ok: true,
 				apiKey,
+				apiKeyResolver,
 				headers: headers && Object.keys(headers).length > 0 ? headers : undefined,
 				env: providerEnv && Object.keys(providerEnv).length > 0 ? providerEnv : undefined,
 				apiKeySelection,

@@ -1654,6 +1654,77 @@ describe("ModelRegistry", () => {
 			expect(registry.shouldRetryProviderApiKeyFailure("custom-provider", "auth")).toBe(false);
 		});
 
+		test("apiKeys treats quota 429 as failover and does not reuse keys while all are cooling down", async () => {
+			writeRawModelsJson({
+				"custom-provider": providerWithApiKeys(["key-a", "key-b"]),
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("custom-provider", "test-model");
+			expect(model).toBeDefined();
+
+			const firstAuth = await registry.getApiKeyAndHeaders(model!);
+			expect(firstAuth).toMatchObject({
+				ok: true,
+				apiKey: "key-a",
+				apiKeySelection: { provider: "custom-provider", index: 0, count: 2 },
+			});
+			if (!firstAuth.ok) throw new Error("Expected first auth to resolve");
+
+			registry.recordProviderApiKeyResult(
+				firstAuth.apiKeySelection,
+				"429 Daily token quota reached for naraya/mimo-v2.5-pro-free",
+			);
+			expect(registry.shouldRetryProviderApiKeyFailure("custom-provider", "quota")).toBe(true);
+
+			const secondAuth = await registry.getApiKeyAndHeaders(model!);
+			expect(secondAuth).toMatchObject({
+				ok: true,
+				apiKey: "key-b",
+				apiKeySelection: { provider: "custom-provider", index: 1, count: 2 },
+			});
+			if (!secondAuth.ok) throw new Error("Expected second auth to resolve");
+
+			registry.recordProviderApiKeyResult(
+				secondAuth.apiKeySelection,
+				"429 Daily token quota reached for naraya/mimo-v2.5-pro-free",
+			);
+			expect(registry.shouldRetryProviderApiKeyFailure("custom-provider", "quota")).toBe(false);
+			await expect(registry.getApiKeyForProvider("custom-provider")).resolves.toBeUndefined();
+		});
+
+		test("apiKeys does not burn sibling keys for transient 429 rate limits", async () => {
+			writeRawModelsJson({
+				"custom-provider": providerWithApiKeys(["key-a", "key-b"]),
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("custom-provider", "test-model");
+			expect(model).toBeDefined();
+
+			const firstAuth = await registry.getApiKeyAndHeaders(model!);
+			expect(firstAuth).toMatchObject({
+				ok: true,
+				apiKey: "key-a",
+				apiKeySelection: { provider: "custom-provider", index: 0, count: 2 },
+			});
+			if (!firstAuth.ok) throw new Error("Expected first auth to resolve");
+
+			registry.recordProviderApiKeyResult(firstAuth.apiKeySelection, "HTTP 429 Too many requests per minute");
+			expect(registry.shouldRetryProviderApiKeyFailure("custom-provider", "rate_limited")).toBe(false);
+
+			const secondAuth = await registry.getApiKeyAndHeaders(model!);
+			expect(secondAuth).toMatchObject({
+				ok: true,
+				apiKey: "key-b",
+				apiKeySelection: { provider: "custom-provider", index: 1, count: 2 },
+			});
+			if (!secondAuth.ok) throw new Error("Expected second auth to resolve");
+
+			registry.recordProviderApiKeyResult(secondAuth.apiKeySelection, "HTTP 429 Too many requests per minute");
+			await expect(registry.getApiKeyForProvider("custom-provider")).resolves.toBe("key-a");
+		});
+
 		test("apiKeys cannot be combined with apiKey", () => {
 			writeRawModelsJson({
 				"custom-provider": {

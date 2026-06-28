@@ -4,14 +4,16 @@ import { join } from "node:path";
 import {
 	type Api,
 	type AssistantMessage,
+	type AssistantMessageEventStream,
+	type Context,
 	createAssistantMessageEventStream,
 	type Model,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { ModelRegistry } from "../src/core/model-registry.ts";
-import { createAgentSession } from "../src/core/sdk.ts";
+import { type ApiKeyResolveContext, ModelRegistry, type ProviderApiKeyResolver } from "../src/core/model-registry.ts";
+import { createAgentSession, streamSimpleWithApiKeyResolver } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
@@ -69,6 +71,30 @@ describe("createAgentSession stream options", () => {
 			timestamp: Date.now(),
 		};
 		stream.end(message);
+		return stream;
+	}
+
+	function createErrorStream(api: Api, errorMessage: string): AssistantMessageEventStream {
+		const stream = createAssistantMessageEventStream();
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api,
+			provider: "capture-provider",
+			model: "capture-model",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage,
+			timestamp: Date.now(),
+		};
+		stream.push({ type: "error", reason: "error", error: message });
 		return stream;
 	}
 
@@ -149,5 +175,27 @@ describe("createAgentSession stream options", () => {
 		);
 
 		expect(options?.websocketConnectTimeoutMs).toBe(0);
+	});
+
+	it("retries with a sibling API key before surfacing a provider error", async () => {
+		const model = createModel("openai-completions");
+		const context: Context = { messages: [] };
+		const attemptedKeys: string[] = [];
+		const resolver = ((ctx: ApiKeyResolveContext) => {
+			if (ctx.error === undefined) return "key-a";
+			if (ctx.lastChance) return "key-b";
+			return undefined;
+		}) as ProviderApiKeyResolver;
+		resolver.getSelection = () => undefined;
+
+		const stream = streamSimpleWithApiKeyResolver(model, context, {}, resolver, (_model, _context, options) => {
+			attemptedKeys.push(options?.apiKey ?? "");
+			return options?.apiKey === "key-a"
+				? createErrorStream("openai-completions", "429 Daily token quota reached")
+				: createDoneStream("openai-completions");
+		});
+
+		await expect(stream.result()).resolves.toMatchObject({ stopReason: "stop" });
+		expect(attemptedKeys).toEqual(["key-a", "key-b"]);
 	});
 });

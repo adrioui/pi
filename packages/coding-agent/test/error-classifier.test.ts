@@ -164,6 +164,12 @@ describe("error-classifier", () => {
 			expect(result.retryable).toBe(false);
 		});
 
+		it("classifies Naraya 429 daily token quota as quota, not transient rate limit", () => {
+			const result = classifyError("429 Daily token quota reached for naraya/mimo-v2.5-pro-free");
+			expect(result.category).toBe("quota");
+			expect(result.retryable).toBe(false);
+		});
+
 		it("classifies context length errors", () => {
 			const result = classifyError("This model's maximum context length is 128000 tokens");
 			expect(result.category).toBe("context_length");

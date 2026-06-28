@@ -228,6 +228,25 @@ export function classifyError(error: unknown, headers?: Record<string, string>):
 		};
 	}
 
+	// Quota or account usage limits. Check before HTTP status so a provider
+	// body like "429 Daily token quota reached" is not treated as transient.
+	if (
+		lower.includes("quota") ||
+		lower.includes("credit") ||
+		lower.includes("insufficient") ||
+		lower.includes("billing") ||
+		lower.includes("payment") ||
+		lower.includes("usage limit") ||
+		lower.includes("limit_reached") ||
+		lower.includes("resource_exhausted")
+	) {
+		return {
+			category: "quota",
+			retryable: false,
+			message: "Quota exceeded or insufficient credits. Check your billing plan or wait for quota reset.",
+		};
+	}
+
 	// Check for known HTTP status patterns
 	const KNOWN_STATUSES = [401, 403, 404, 408, 409, 413, 422, 429, 500, 502, 503, 504];
 	const statusMatch = message.match(/\b(\d{3})\b/);
@@ -261,21 +280,6 @@ export function classifyError(error: unknown, headers?: Record<string, string>):
 			category: "auth",
 			retryable: false,
 			message: "Authentication failed. Check your API key or login credentials.",
-		};
-	}
-
-	// Quota
-	if (
-		lower.includes("quota") ||
-		lower.includes("credit") ||
-		lower.includes("insufficient") ||
-		lower.includes("billing") ||
-		lower.includes("payment")
-	) {
-		return {
-			category: "quota",
-			retryable: false,
-			message: "Quota exceeded or insufficient credits. Check your billing plan or wait for quota reset.",
 		};
 	}
 
