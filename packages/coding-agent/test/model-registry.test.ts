@@ -1252,6 +1252,14 @@ describe("ModelRegistry", () => {
 			};
 		}
 
+		function providerWithApiKeys(apiKeys: string[]) {
+			return {
+				...providerWithApiKey("unused"),
+				apiKey: undefined,
+				apiKeys,
+			};
+		}
+
 		test("apiKey with ! prefix executes command and uses stdout", async () => {
 			writeRawModelsJson({
 				"custom-provider": providerWithApiKey("!echo test-api-key-from-command"),
@@ -1462,6 +1470,213 @@ describe("ModelRegistry", () => {
 			const apiKey = await registry.getApiKeyForProvider("custom-provider");
 
 			expect(apiKey).toBe("literal_api_key_value");
+		});
+
+		test("apiKeys rotates configured keys by provider request", async () => {
+			writeRawModelsJson({
+				"custom-provider": providerWithApiKeys(["key-a", "key-b"]),
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("custom-provider", "test-model");
+			expect(model).toBeDefined();
+
+			await expect(registry.getApiKeyAndHeaders(model!)).resolves.toMatchObject({
+				ok: true,
+				apiKey: "key-a",
+				apiKeySelection: { provider: "custom-provider", index: 0, count: 2 },
+			});
+			await expect(registry.getApiKeyAndHeaders(model!)).resolves.toMatchObject({
+				ok: true,
+				apiKey: "key-b",
+				apiKeySelection: { provider: "custom-provider", index: 1, count: 2 },
+			});
+			await expect(registry.getApiKeyAndHeaders(model!)).resolves.toMatchObject({
+				ok: true,
+				apiKey: "key-a",
+				apiKeySelection: { provider: "custom-provider", index: 0, count: 2 },
+			});
+		});
+
+		test("apiKeys skips unresolved env values", async () => {
+			const originalEnv = process.env.TEST_API_KEYS_RESOLVED_98765;
+			delete process.env.TEST_API_KEYS_MISSING_98765;
+			process.env.TEST_API_KEYS_RESOLVED_98765 = "resolved-key";
+
+			try {
+				writeRawModelsJson({
+					"custom-provider": providerWithApiKeys([
+						"$TEST_API_KEYS_MISSING_98765",
+						"$TEST_API_KEYS_RESOLVED_98765",
+					]),
+				});
+
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+				const model = registry.find("custom-provider", "test-model");
+				expect(model).toBeDefined();
+
+				await expect(registry.getApiKeyAndHeaders(model!)).resolves.toMatchObject({
+					ok: true,
+					apiKey: "resolved-key",
+					apiKeySelection: { provider: "custom-provider", index: 1, count: 2 },
+				});
+			} finally {
+				if (originalEnv === undefined) {
+					delete process.env.TEST_API_KEYS_RESOLVED_98765;
+				} else {
+					process.env.TEST_API_KEYS_RESOLVED_98765 = originalEnv;
+				}
+				delete process.env.TEST_API_KEYS_MISSING_98765;
+			}
+		});
+
+		test("apiKeys authHeader uses the selected key", async () => {
+			writeRawModelsJson({
+				"custom-provider": {
+					...providerWithApiKeys(["key-a", "key-b"]),
+					authHeader: true,
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("custom-provider", "test-model");
+			expect(model).toBeDefined();
+
+			await expect(registry.getApiKeyAndHeaders(model!)).resolves.toEqual({
+				ok: true,
+				apiKey: "key-a",
+				apiKeySelection: { provider: "custom-provider", index: 0, count: 2 },
+				headers: { Authorization: "Bearer key-a" },
+			});
+			await expect(registry.getApiKeyAndHeaders(model!)).resolves.toEqual({
+				ok: true,
+				apiKey: "key-b",
+				apiKeySelection: { provider: "custom-provider", index: 1, count: 2 },
+				headers: { Authorization: "Bearer key-b" },
+			});
+		});
+
+		test("auth storage takes precedence over apiKeys", async () => {
+			authStorage.set("custom-provider", { type: "api_key", key: "stored-key" });
+			writeRawModelsJson({
+				"custom-provider": providerWithApiKeys(["key-a", "key-b"]),
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("custom-provider", "test-model");
+			expect(model).toBeDefined();
+
+			await expect(registry.getApiKeyAndHeaders(model!)).resolves.toMatchObject({
+				ok: true,
+				apiKey: "stored-key",
+			});
+		});
+
+		test("auth storage keys rotate and take precedence over models.json apiKeys", async () => {
+			authStorage.set("custom-provider", { type: "api_key", keys: ["stored-key-a", "stored-key-b"] });
+			writeRawModelsJson({
+				"custom-provider": providerWithApiKeys(["config-key-a", "config-key-b"]),
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("custom-provider", "test-model");
+			expect(model).toBeDefined();
+
+			await expect(registry.getApiKeyAndHeaders(model!)).resolves.toMatchObject({
+				ok: true,
+				apiKey: "stored-key-a",
+				apiKeySelection: { provider: "custom-provider", index: 0, count: 2 },
+			});
+			await expect(registry.getApiKeyAndHeaders(model!)).resolves.toMatchObject({
+				ok: true,
+				apiKey: "stored-key-b",
+				apiKeySelection: { provider: "custom-provider", index: 1, count: 2 },
+			});
+		});
+
+		test("auth storage keys cool down failed keys and retry with another stored key", async () => {
+			authStorage.set("custom-provider", { type: "api_key", keys: ["stored-key-a", "stored-key-b"] });
+			writeRawModelsJson({
+				"custom-provider": providerWithApiKey("config-key"),
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("custom-provider", "test-model");
+			expect(model).toBeDefined();
+
+			const firstAuth = await registry.getApiKeyAndHeaders(model!);
+			expect(firstAuth).toMatchObject({
+				ok: true,
+				apiKey: "stored-key-a",
+				apiKeySelection: { provider: "custom-provider", index: 0, count: 2 },
+			});
+			if (!firstAuth.ok) throw new Error("Expected first auth to resolve");
+
+			registry.recordProviderApiKeyResult(firstAuth.apiKeySelection, "invalid_api_key");
+			expect(registry.shouldRetryProviderApiKeyFailure("custom-provider", "auth")).toBe(true);
+
+			await expect(registry.getApiKeyAndHeaders(model!)).resolves.toMatchObject({
+				ok: true,
+				apiKey: "stored-key-b",
+				apiKeySelection: { provider: "custom-provider", index: 1, count: 2 },
+			});
+		});
+
+		test("apiKeys cools down failed keys and retries with another key", async () => {
+			writeRawModelsJson({
+				"custom-provider": providerWithApiKeys(["key-a", "key-b"]),
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("custom-provider", "test-model");
+			expect(model).toBeDefined();
+
+			const firstAuth = await registry.getApiKeyAndHeaders(model!);
+			expect(firstAuth).toMatchObject({
+				ok: true,
+				apiKey: "key-a",
+				apiKeySelection: { provider: "custom-provider", index: 0, count: 2 },
+			});
+			if (!firstAuth.ok) throw new Error("Expected first auth to resolve");
+
+			registry.recordProviderApiKeyResult(firstAuth.apiKeySelection, "invalid_api_key");
+			expect(registry.shouldRetryProviderApiKeyFailure("custom-provider", "auth")).toBe(true);
+
+			const secondAuth = await registry.getApiKeyAndHeaders(model!);
+			expect(secondAuth).toMatchObject({
+				ok: true,
+				apiKey: "key-b",
+				apiKeySelection: { provider: "custom-provider", index: 1, count: 2 },
+			});
+			if (!secondAuth.ok) throw new Error("Expected second auth to resolve");
+
+			registry.recordProviderApiKeyResult(secondAuth.apiKeySelection, "invalid_api_key");
+			expect(registry.shouldRetryProviderApiKeyFailure("custom-provider", "auth")).toBe(false);
+		});
+
+		test("apiKeys cannot be combined with apiKey", () => {
+			writeRawModelsJson({
+				"custom-provider": {
+					...providerWithApiKey("key-a"),
+					apiKeys: ["key-b"],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.getError()).toContain('specify either "apiKey" or "apiKeys"');
+		});
+
+		test("empty apiKeys is invalid", () => {
+			writeRawModelsJson({
+				"custom-provider": {
+					...providerWithApiKey("unused"),
+					apiKey: undefined,
+					apiKeys: [],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.getError()).toContain("Invalid models.json schema");
 		});
 
 		test("apiKey command can use shell features like pipes", async () => {

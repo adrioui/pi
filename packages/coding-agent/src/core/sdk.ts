@@ -321,7 +321,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const timeoutMs = options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs;
 			const websocketConnectTimeoutMs =
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
-			return streamSimple(model, context, {
+			const response = streamSimple(model, context, {
 				...options,
 				apiKey: auth.apiKey,
 				env,
@@ -337,6 +337,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					options?.headers,
 				),
 			});
+			void response.result().then(
+				(message) => {
+					modelRegistry.recordProviderApiKeyResult(
+						auth.apiKeySelection,
+						message.stopReason === "error" ? (message.errorMessage ?? "Provider returned an error") : undefined,
+					);
+				},
+				(error) => {
+					modelRegistry.recordProviderApiKeyResult(
+						auth.apiKeySelection,
+						error instanceof Error ? error.message : String(error),
+					);
+				},
+			);
+			return response;
 		},
 		onPayload: async (payload, _model) => {
 			const runner = extensionRunnerRef.current;

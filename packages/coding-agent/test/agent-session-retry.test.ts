@@ -228,6 +228,88 @@ describe("AgentSession retry", () => {
 		expect(events).toEqual(["start:1", "end:success=true"]);
 	});
 
+	it("retries API key failures for custom provider apiKeys", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		modelRegistry.registerProvider("custom-provider", {
+			baseUrl: "https://custom-provider.test/v1",
+			apiKeys: ["key-a", "key-b"],
+			api: "openai-completions",
+			models: [
+				{
+					id: "custom-model",
+					name: "Custom Model",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 100000,
+					maxTokens: 8000,
+				},
+			],
+		});
+		const model = modelRegistry.find("custom-provider", "custom-model");
+		expect(model).toBeDefined();
+		if (!model) throw new Error("Expected custom model to be registered");
+
+		let callCount = 0;
+		const selectedKeys: string[] = [];
+		const agent = new Agent({
+			initialState: { model, systemPrompt: "Test", tools: [] },
+			streamFn: async (requestModel) => {
+				callCount++;
+				const auth = await modelRegistry.getApiKeyAndHeaders(requestModel);
+				if (auth.ok && auth.apiKey) {
+					selectedKeys.push(auth.apiKey);
+				}
+
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (callCount === 1) {
+						if (auth.ok) {
+							modelRegistry.recordProviderApiKeyResult(auth.apiKeySelection, "invalid_api_key");
+						}
+						const msg = createAssistantMessage("", {
+							api: "openai-completions",
+							provider: "custom-provider",
+							model: "custom-model",
+							stopReason: "error",
+							errorMessage: "invalid_api_key",
+						});
+						stream.push({ type: "start", partial: msg });
+						stream.push({ type: "error", reason: "error", error: msg });
+						return;
+					}
+
+					const msg = createAssistantMessage("Recovered", {
+						api: "openai-completions",
+						provider: "custom-provider",
+						model: "custom-model",
+					});
+					stream.push({ type: "start", partial: msg });
+					stream.push({ type: "done", reason: "stop", message: msg });
+				});
+				return stream;
+			},
+		});
+
+		settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } });
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader(),
+		});
+
+		await session.prompt("Test");
+
+		expect(callCount).toBe(2);
+		expect(selectedKeys).toEqual(["key-a", "key-b"]);
+	});
+
 	it("prompt waits for full agent loop when retry produces tool calls", async () => {
 		// Regression: when auto-retry fires and the retry response includes tool_use,
 		// session.prompt() must wait for the entire tool loop to finish before returning.

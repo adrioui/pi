@@ -3098,6 +3098,12 @@ export class AgentSession {
 		if (this._isNonRetryableProviderLimitError(err)) return false;
 
 		const classification = classifyError(err);
+		if (
+			!classification.retryable &&
+			this._modelRegistry.shouldRetryProviderApiKeyFailure(message.provider, classification.category)
+		) {
+			return true;
+		}
 		return classification.retryable;
 	}
 

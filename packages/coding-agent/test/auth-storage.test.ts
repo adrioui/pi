@@ -47,6 +47,43 @@ describe("AuthStorage", () => {
 			expect(apiKey).toBe("sk-ant-literal-key");
 		});
 
+		test("multiple literal API keys returns the first resolved key for compatibility", async () => {
+			writeAuthJson({
+				anthropic: { type: "api_key", keys: ["sk-ant-first-key", "sk-ant-second-key"] },
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+			const apiKey = await authStorage.getApiKey("anthropic");
+
+			expect(apiKey).toBe("sk-ant-first-key");
+		});
+
+		test("multiple API keys skips unresolved entries", async () => {
+			const originalEnv = process.env.TEST_AUTH_MULTI_API_KEY_12345;
+			process.env.TEST_AUTH_MULTI_API_KEY_12345 = "env-api-key-value";
+
+			try {
+				writeAuthJson({
+					anthropic: {
+						type: "api_key",
+						keys: ["$TEST_AUTH_MULTI_MISSING_KEY_12345", "$TEST_AUTH_MULTI_API_KEY_12345"],
+					},
+				});
+
+				authStorage = AuthStorage.create(authJsonPath);
+				const apiKey = await authStorage.getApiKey("anthropic");
+
+				expect(apiKey).toBe("env-api-key-value");
+			} finally {
+				if (originalEnv === undefined) {
+					delete process.env.TEST_AUTH_MULTI_API_KEY_12345;
+				} else {
+					process.env.TEST_AUTH_MULTI_API_KEY_12345 = originalEnv;
+				}
+				delete process.env.TEST_AUTH_MULTI_MISSING_KEY_12345;
+			}
+		});
+
 		test("apiKey with ! prefix executes command and uses stdout", async () => {
 			writeAuthJson({
 				anthropic: { type: "api_key", key: "!echo test-api-key-from-command" },

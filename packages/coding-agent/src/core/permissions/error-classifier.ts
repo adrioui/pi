@@ -252,6 +252,7 @@ export function classifyError(error: unknown, headers?: Record<string, string>):
 		lower.includes("unauthorized") ||
 		lower.includes("unauthenticated") ||
 		lower.includes("api key") ||
+		lower.includes("api_key") ||
 		lower.includes("invalid key") ||
 		lower.includes("invalid authentication") ||
 		lower.includes("auth")

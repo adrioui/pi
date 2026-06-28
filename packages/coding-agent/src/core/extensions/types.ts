@@ -1413,6 +1413,8 @@ export interface ProviderConfig {
 	baseUrl?: string;
 	/** API key literal, env interpolation ($ENV_VAR or ${ENV_VAR}), or leading !command. Required when defining models (unless oauth provided). */
 	apiKey?: string;
+	/** API key literals, env interpolations, or leading !commands to rotate for this provider. Mutually exclusive with apiKey. */
+	apiKeys?: string[];
 	/** API type. Required at provider or model level when defining models. */
 	api?: Api;
 	/** Optional streamSimple handler for custom APIs. */

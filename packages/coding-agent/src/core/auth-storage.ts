@@ -23,7 +23,8 @@ import { resolveConfigValue } from "./resolve-config-value.ts";
 
 export type ApiKeyCredential = {
 	type: "api_key";
-	key: string;
+	key?: string;
+	keys?: string[];
 	env?: Record<string, string>;
 };
 
@@ -239,6 +240,10 @@ export class AuthStorage {
 	 */
 	removeRuntimeApiKey(provider: string): void {
 		this.runtimeOverrides.delete(provider);
+	}
+
+	getRuntimeApiKey(provider: string): string | undefined {
+		return this.runtimeOverrides.get(provider);
 	}
 
 	private recordError(error: unknown): void {
@@ -469,7 +474,12 @@ export class AuthStorage {
 		const cred = this.data[providerId];
 
 		if (cred?.type === "api_key") {
-			return resolveConfigValue(cred.key, cred.env);
+			if (cred.key) return resolveConfigValue(cred.key, cred.env);
+			for (const key of cred.keys ?? []) {
+				const resolved = resolveConfigValue(key, cred.env);
+				if (resolved) return resolved;
+			}
+			return undefined;
 		}
 
 		if (cred?.type === "oauth") {

@@ -28,12 +28,14 @@ import { getAgentDir } from "../config.ts";
 import { stripJsonComments } from "../utils/json.ts";
 import { normalizePath } from "../utils/paths.ts";
 import type { AuthStatus, AuthStorage } from "./auth-storage.ts";
+import { classifyError, type ErrorCategory } from "./permissions/error-classifier.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.ts";
 import {
 	clearConfigValueCache,
 	getConfigValueEnvVarNames,
 	isCommandConfigValue,
 	isConfigValueConfigured,
+	resolveConfigValue,
 	resolveConfigValueOrThrow,
 	resolveConfigValueUncached,
 	resolveHeadersOrThrow,
@@ -205,6 +207,7 @@ const ProviderConfigSchema = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	baseUrl: Type.Optional(Type.String({ minLength: 1 })),
 	apiKey: Type.Optional(Type.String({ minLength: 1 })),
+	apiKeys: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
 	api: Type.Optional(Type.String({ minLength: 1 })),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
@@ -242,8 +245,15 @@ interface ProviderOverride {
 
 interface ProviderRequestConfig {
 	apiKey?: string;
+	apiKeys?: string[];
 	headers?: Record<string, string>;
 	authHeader?: boolean;
+}
+
+export interface ProviderApiKeySelection {
+	provider: string;
+	index: number;
+	count: number;
 }
 
 export type ResolvedRequestAuth =
@@ -252,6 +262,7 @@ export type ResolvedRequestAuth =
 			apiKey?: string;
 			headers?: Record<string, string>;
 			env?: Record<string, string>;
+			apiKeySelection?: ProviderApiKeySelection;
 	  }
 	| {
 			ok: false;
@@ -261,7 +272,7 @@ export type ResolvedRequestAuth =
 /** Result of loading custom models from models.json */
 interface CustomModelsResult {
 	models: Model<Api>[];
-	/** Providers with baseUrl/headers/apiKey overrides for built-in models */
+	/** Providers with baseUrl/headers/apiKey/apiKeys overrides for built-in models */
 	overrides: Map<string, ProviderOverride>;
 	/** Per-model overrides: provider -> modelId -> override */
 	modelOverrides: Map<string, Map<string, ModelOverride>>;
@@ -346,6 +357,14 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 /** Clear the config value command cache. Exported for testing. */
 export const clearApiKeyCache = clearConfigValueCache;
 
+interface ProviderApiKeysState {
+	nextIndex: number;
+	cooldowns: Map<number, number>;
+}
+
+const TRANSIENT_API_KEY_COOLDOWN_MS = 60_000;
+const LONG_API_KEY_COOLDOWN_MS = 30 * 60_000;
+
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
@@ -353,6 +372,7 @@ export class ModelRegistry {
 	private models: Model<Api>[] = [];
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
 	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
+	private providerApiKeysState: Map<string, ProviderApiKeysState> = new Map();
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
 	private loadError: string | undefined = undefined;
 	readonly authStorage: AuthStorage;
@@ -378,6 +398,7 @@ export class ModelRegistry {
 	refresh(): void {
 		this.providerRequestConfigs.clear();
 		this.modelRequestHeaders.clear();
+		this.providerApiKeysState.clear();
 		this.loadError = undefined;
 
 		// Ensure dynamic API/OAuth registrations are rebuilt from current provider state.
@@ -532,6 +553,10 @@ export class ModelRegistry {
 		const builtInProviders = new Set<string>(getProviders());
 
 		for (const [providerName, providerConfig] of Object.entries(config.providers)) {
+			if (providerConfig.apiKey && providerConfig.apiKeys) {
+				throw new Error(`Provider ${providerName}: specify either "apiKey" or "apiKeys", not both.`);
+			}
+
 			const isBuiltIn = builtInProviders.has(providerName);
 			const hasProviderApi = !!providerConfig.api;
 			const models = providerConfig.models ?? [];
@@ -656,10 +681,13 @@ export class ModelRegistry {
 	 * Get API key for a model.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
-		const providerApiKey = this.providerRequestConfigs.get(model.provider)?.apiKey;
+		const providerRequestConfig = this.providerRequestConfigs.get(model.provider);
+		const providerApiKey = providerRequestConfig?.apiKey;
+		const providerApiKeys = providerRequestConfig?.apiKeys;
 		return (
 			this.authStorage.hasAuth(model.provider) ||
-			(providerApiKey !== undefined && isConfigValueConfigured(providerApiKey))
+			(providerApiKey !== undefined && isConfigValueConfigured(providerApiKey)) ||
+			(providerApiKeys?.some((apiKey) => isConfigValueConfigured(apiKey)) ?? false)
 		);
 	}
 
@@ -671,16 +699,18 @@ export class ModelRegistry {
 		providerName: string,
 		config: {
 			apiKey?: string;
+			apiKeys?: string[];
 			headers?: Record<string, string>;
 			authHeader?: boolean;
 		},
 	): void {
-		if (!config.apiKey && !config.headers && !config.authHeader) {
+		if (!config.apiKey && !config.apiKeys && !config.headers && !config.authHeader) {
 			return;
 		}
 
 		this.providerRequestConfigs.set(providerName, {
 			apiKey: config.apiKey,
+			apiKeys: config.apiKeys,
 			headers: config.headers,
 			authHeader: config.authHeader,
 		});
@@ -695,6 +725,107 @@ export class ModelRegistry {
 		this.modelRequestHeaders.set(key, headers);
 	}
 
+	private getProviderApiKeysState(provider: string): ProviderApiKeysState {
+		let state = this.providerApiKeysState.get(provider);
+		if (!state) {
+			state = { nextIndex: 0, cooldowns: new Map() };
+			this.providerApiKeysState.set(provider, state);
+		}
+		return state;
+	}
+
+	private resolveProviderApiKeys(
+		provider: string,
+		apiKeys: string[] | undefined,
+		providerEnv: Record<string, string> | undefined,
+		resolveValue: (config: string, env?: Record<string, string>) => string | undefined = resolveConfigValueUncached,
+	): { apiKey: string; selection: ProviderApiKeySelection } | undefined {
+		if (!apiKeys || apiKeys.length === 0) return undefined;
+
+		const resolved = apiKeys.map((apiKey) => resolveValue(apiKey, providerEnv));
+		const availableIndexes = resolved
+			.map((apiKey, index) => ({ apiKey, index }))
+			.filter((entry): entry is { apiKey: string; index: number } => entry.apiKey !== undefined);
+		if (availableIndexes.length === 0) return undefined;
+
+		const state = this.getProviderApiKeysState(provider);
+		const now = Date.now();
+		const start = state.nextIndex % resolved.length;
+
+		let selected = availableIndexes[0];
+		for (let offset = 0; offset < resolved.length; offset++) {
+			const index = (start + offset) % resolved.length;
+			const apiKey = resolved[index];
+			if (!apiKey) continue;
+			const cooldownUntil = state.cooldowns.get(index) ?? 0;
+			if (cooldownUntil <= now) {
+				selected = { apiKey, index };
+				break;
+			}
+		}
+
+		state.nextIndex = (selected.index + 1) % resolved.length;
+		return {
+			apiKey: selected.apiKey,
+			selection: { provider, index: selected.index, count: resolved.length },
+		};
+	}
+
+	recordProviderApiKeyResult(selection: ProviderApiKeySelection | undefined, error: string | undefined): void {
+		if (!selection) return;
+
+		const state = this.getProviderApiKeysState(selection.provider);
+		if (!error) {
+			state.cooldowns.delete(selection.index);
+			return;
+		}
+
+		const classification = classifyError(error);
+		const cooldownMs = this.getApiKeyCooldownMs(classification.category, classification.retryable);
+		if (cooldownMs === 0) return;
+		state.cooldowns.set(selection.index, Date.now() + cooldownMs);
+	}
+
+	shouldRetryProviderApiKeyFailure(provider: string, category: ErrorCategory): boolean {
+		if (!this.isApiKeyFailoverCategory(category)) return false;
+		const apiKeys = this.getActiveProviderApiKeys(provider);
+		if (!apiKeys || apiKeys.length < 2) return false;
+
+		const state = this.getProviderApiKeysState(provider);
+		const now = Date.now();
+		return apiKeys.some((_, index) => (state.cooldowns.get(index) ?? 0) <= now);
+	}
+
+	private getActiveProviderApiKeys(provider: string): string[] | undefined {
+		if (this.authStorage.getRuntimeApiKey(provider)) return undefined;
+
+		const credential = this.authStorage.get(provider);
+		if (credential?.type === "oauth") return undefined;
+		if (credential?.type === "api_key") return credential.keys;
+
+		return this.providerRequestConfigs.get(provider)?.apiKeys;
+	}
+
+	private getApiKeyCooldownMs(category: ErrorCategory, retryable: boolean): number {
+		if (retryable) return TRANSIENT_API_KEY_COOLDOWN_MS;
+		if (category === "auth" || category === "quota" || category === "permission_denied") {
+			return LONG_API_KEY_COOLDOWN_MS;
+		}
+		return 0;
+	}
+
+	private isApiKeyFailoverCategory(category: ErrorCategory): boolean {
+		return (
+			category === "timeout" ||
+			category === "network" ||
+			category === "rate_limited" ||
+			category === "server_error" ||
+			category === "auth" ||
+			category === "quota" ||
+			category === "permission_denied"
+		);
+	}
+
 	/**
 	 * Get API key and request headers for a model.
 	 */
@@ -702,16 +833,47 @@ export class ModelRegistry {
 		try {
 			const providerConfig = this.providerRequestConfigs.get(model.provider);
 			const providerEnv = this.authStorage.getProviderEnv(model.provider);
-			const apiKeyFromAuthStorage = await this.authStorage.getApiKey(model.provider, { includeFallback: false });
-			const apiKey =
-				apiKeyFromAuthStorage ??
-				(providerConfig?.apiKey
-					? resolveConfigValueOrThrow(
-							providerConfig.apiKey,
-							`API key for provider "${model.provider}"`,
-							providerEnv,
-						)
-					: undefined);
+			const runtimeApiKey = this.authStorage.getRuntimeApiKey(model.provider);
+			const storedCredential = this.authStorage.get(model.provider);
+			let apiKey = runtimeApiKey;
+			let apiKeySelection: ProviderApiKeySelection | undefined;
+
+			if (apiKey === undefined && storedCredential?.type === "api_key") {
+				if (storedCredential.key) {
+					apiKey = resolveConfigValue(storedCredential.key, storedCredential.env);
+				} else if (storedCredential.keys) {
+					const selected = this.resolveProviderApiKeys(
+						model.provider,
+						storedCredential.keys,
+						storedCredential.env,
+						resolveConfigValue,
+					);
+					if (selected) {
+						apiKey = selected.apiKey;
+						apiKeySelection = selected.selection;
+					}
+				}
+			}
+
+			if (apiKey === undefined && storedCredential?.type !== "api_key") {
+				apiKey = await this.authStorage.getApiKey(model.provider, { includeFallback: false });
+			}
+
+			if (apiKey === undefined && providerConfig?.apiKey) {
+				apiKey = resolveConfigValueOrThrow(
+					providerConfig.apiKey,
+					`API key for provider "${model.provider}"`,
+					providerEnv,
+				);
+			}
+
+			if (apiKey === undefined && providerConfig?.apiKeys) {
+				const selected = this.resolveProviderApiKeys(model.provider, providerConfig.apiKeys, providerEnv);
+				if (selected) {
+					apiKey = selected.apiKey;
+					apiKeySelection = selected.selection;
+				}
+			}
 
 			const providerHeaders = resolveHeadersOrThrow(
 				providerConfig?.headers,
@@ -741,6 +903,7 @@ export class ModelRegistry {
 				apiKey,
 				headers: headers && Object.keys(headers).length > 0 ? headers : undefined,
 				env: providerEnv && Object.keys(providerEnv).length > 0 ? providerEnv : undefined,
+				apiKeySelection,
 			};
 		} catch (error) {
 			return {
@@ -760,10 +923,30 @@ export class ModelRegistry {
 			return authStatus;
 		}
 
-		const providerApiKey = this.providerRequestConfigs.get(provider)?.apiKey;
-		if (!providerApiKey) {
+		const providerRequestConfig = this.providerRequestConfigs.get(provider);
+		const providerApiKey = providerRequestConfig?.apiKey;
+		const providerApiKeys = providerRequestConfig?.apiKeys;
+		if (!providerApiKey && !providerApiKeys) {
 			return authStatus;
 		}
+
+		if (providerApiKeys) {
+			if (providerApiKeys.some((apiKey) => isCommandConfigValue(apiKey))) {
+				return { configured: true, source: "models_json_command" };
+			}
+
+			const envVarNames = providerApiKeys.flatMap((apiKey) => getConfigValueEnvVarNames(apiKey));
+			if (envVarNames.length > 0) {
+				const uniqueEnvVarNames = [...new Set(envVarNames)];
+				return providerApiKeys.some((apiKey) => isConfigValueConfigured(apiKey))
+					? { configured: true, source: "environment", label: uniqueEnvVarNames.join(", ") }
+					: { configured: false };
+			}
+
+			return { configured: true, source: "models_json_key" };
+		}
+
+		if (!providerApiKey) return authStatus;
 
 		if (isCommandConfigValue(providerApiKey)) {
 			return { configured: true, source: "models_json_command" };
@@ -805,9 +988,12 @@ export class ModelRegistry {
 		}
 
 		const providerApiKey = this.providerRequestConfigs.get(provider)?.apiKey;
-		return providerApiKey
-			? resolveConfigValueUncached(providerApiKey, this.authStorage.getProviderEnv(provider))
-			: undefined;
+		if (providerApiKey) {
+			return resolveConfigValueUncached(providerApiKey, this.authStorage.getProviderEnv(provider));
+		}
+
+		const providerApiKeys = this.providerRequestConfigs.get(provider)?.apiKeys;
+		return this.resolveProviderApiKeys(provider, providerApiKeys, this.authStorage.getProviderEnv(provider))?.apiKey;
 	}
 
 	/**
@@ -866,6 +1052,13 @@ export class ModelRegistry {
 	}
 
 	private validateProviderConfig(providerName: string, config: ProviderConfigInput): void {
+		if (config.apiKey && config.apiKeys) {
+			throw new Error(`Provider ${providerName}: specify either "apiKey" or "apiKeys", not both.`);
+		}
+		if (config.apiKeys && config.apiKeys.length === 0) {
+			throw new Error(`Provider ${providerName}: "apiKeys" must contain at least one key.`);
+		}
+
 		if (config.streamSimple && !config.api) {
 			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
 		}
@@ -877,8 +1070,8 @@ export class ModelRegistry {
 		if (!config.baseUrl) {
 			throw new Error(`Provider ${providerName}: "baseUrl" is required when defining models.`);
 		}
-		if (!config.apiKey && !config.oauth) {
-			throw new Error(`Provider ${providerName}: "apiKey" or "oauth" is required when defining models.`);
+		if (!config.apiKey && !config.apiKeys && !config.oauth) {
+			throw new Error(`Provider ${providerName}: "apiKey", "apiKeys", or "oauth" is required when defining models.`);
 		}
 
 		for (const modelDef of config.models) {
@@ -967,6 +1160,7 @@ export interface ProviderConfigInput {
 	name?: string;
 	baseUrl?: string;
 	apiKey?: string;
+	apiKeys?: string[];
 	api?: Api;
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	headers?: Record<string, string>;
