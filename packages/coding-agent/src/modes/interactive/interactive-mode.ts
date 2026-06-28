@@ -242,6 +242,16 @@ export function isApiKeyLoginProvider(
 	return !oauthProviderIds.has(providerId);
 }
 
+export function parseApiKeyLoginInput(input: string): string[] {
+	const trimmed = input.trim();
+	if (!trimmed) return [];
+	const separator = trimmed.includes("\n") || trimmed.includes("\r") ? /[\r\n]+/ : /,+/;
+	return trimmed
+		.split(separator)
+		.map((key) => key.trim())
+		.filter((key) => key.length > 0);
+}
+
 /**
  * Options for InteractiveMode initialization.
  */
@@ -4884,12 +4894,17 @@ export class InteractiveMode {
 		};
 
 		try {
-			const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
-			if (!apiKey) {
+			const apiKeys = parseApiKeyLoginInput(
+				await dialog.showPrompt("Enter API key(s). Separate multiple keys with commas or new lines:"),
+			);
+			if (apiKeys.length === 0) {
 				throw new Error("API key cannot be empty.");
 			}
 
-			this.session.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
+			this.session.modelRegistry.authStorage.set(
+				providerId,
+				apiKeys.length === 1 ? { type: "api_key", key: apiKeys[0] } : { type: "api_key", keys: apiKeys },
+			);
 
 			restoreEditor();
 			await this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel);
