@@ -1545,7 +1545,7 @@ export class InteractiveMode {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			},
 			commandContextActions: {
-				waitForIdle: () => this.session.agent.waitForIdle(),
+				waitForIdle: () => this.session.waitForIdle(),
 				newSession: async (options) => {
 					if (this.loadingAnimation) {
 						this.loadingAnimation.stop();
@@ -1693,7 +1693,7 @@ export class InteractiveMode {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.session.modelRegistry,
 			model: this.session.model,
-			isIdle: () => !this.session.isStreaming,
+			isIdle: () => !this.session.isStreaming && !this.session.isRetrying,
 			isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 			signal: this.session.agent.signal,
 			abort: () => {

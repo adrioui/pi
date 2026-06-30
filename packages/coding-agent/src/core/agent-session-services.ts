@@ -14,6 +14,7 @@ import {
 } from "./resource-loader.ts";
 import { type CreateAgentSessionOptions, type CreateAgentSessionResult, createAgentSession } from "./sdk.ts";
 import type { SessionManager } from "./session-manager.ts";
+import { attachSessionOrchestrator } from "./session-orchestrator.ts";
 import { SettingsManager } from "./settings-manager.ts";
 
 /**
@@ -187,7 +188,7 @@ export async function createAgentSessionServices(
 export async function createAgentSessionFromServices(
 	options: CreateAgentSessionFromServicesOptions,
 ): Promise<CreateAgentSessionResult> {
-	return createAgentSession({
+	const created = await createAgentSession({
 		cwd: options.services.cwd,
 		agentDir: options.services.agentDir,
 		authStorage: options.services.authStorage,
@@ -204,4 +205,6 @@ export async function createAgentSessionFromServices(
 		customTools: options.customTools,
 		sessionStartEvent: options.sessionStartEvent,
 	});
+	await attachSessionOrchestrator(created.session, options.services);
+	return created;
 }

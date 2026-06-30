@@ -19,6 +19,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "model", description: "Select model (opens selector UI)" },
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
+	{ name: "configure-models", description: "Configure feature model assignments (goal verifier, observer, etc.)" },
 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
 	{ name: "import", description: "Import and resume a session from a JSONL file" },
 	{ name: "share", description: "Share session as a secret GitHub gist" },
@@ -35,6 +36,10 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "logout", description: "Remove provider authentication" },
 	{ name: "new", description: "Start a new session" },
 	{ name: "compact", description: "Manually compact the session context" },
+	{
+		name: "learn-taste",
+		description: "Learn local taste rules from git history and discovered coding-agent sessions",
+	},
 	{ name: "resume", description: "Resume a different session" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" },
 	{ name: "quit", description: `Quit ${APP_NAME}` },
