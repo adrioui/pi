@@ -21,6 +21,7 @@ export const KIMI_CODING_MODELS = {
 		},
 		contextWindow: 262144,
 		maxTokens: 32768,
+		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"kimi-for-coding": {
 		id: "kimi-for-coding",
@@ -39,6 +40,7 @@ export const KIMI_CODING_MODELS = {
 		},
 		contextWindow: 262144,
 		maxTokens: 32768,
+		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"kimi-k2-thinking": {
 		id: "kimi-k2-thinking",
@@ -57,5 +59,6 @@ export const KIMI_CODING_MODELS = {
 		},
 		contextWindow: 262144,
 		maxTokens: 32768,
+		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 } as const;

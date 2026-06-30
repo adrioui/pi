@@ -20,6 +20,7 @@ export const GROQ_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 131072,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"llama-3.3-70b-versatile": {
 		id: "llama-3.3-70b-versatile",
@@ -37,6 +38,7 @@ export const GROQ_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 32768,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"meta-llama/llama-4-scout-17b-16e-instruct": {
 		id: "meta-llama/llama-4-scout-17b-16e-instruct",
@@ -54,6 +56,7 @@ export const GROQ_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 8192,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"openai/gpt-oss-120b": {
 		id: "openai/gpt-oss-120b",
@@ -71,6 +74,7 @@ export const GROQ_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 65536,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"openai/gpt-oss-20b": {
 		id: "openai/gpt-oss-20b",
@@ -88,6 +92,7 @@ export const GROQ_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 65536,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"openai/gpt-oss-safeguard-20b": {
 		id: "openai/gpt-oss-safeguard-20b",
@@ -105,6 +110,7 @@ export const GROQ_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 65536,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"qwen/qwen3-32b": {
 		id: "qwen/qwen3-32b",
@@ -123,5 +129,6 @@ export const GROQ_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 40960,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 } as const;

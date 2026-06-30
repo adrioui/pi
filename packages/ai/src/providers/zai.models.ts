@@ -21,6 +21,7 @@ export const ZAI_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 98304,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"glm-4.7": {
 		id: "glm-4.7",
@@ -39,6 +40,7 @@ export const ZAI_MODELS = {
 		},
 		contextWindow: 204800,
 		maxTokens: 131072,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"glm-5-turbo": {
 		id: "glm-5-turbo",
@@ -57,6 +59,7 @@ export const ZAI_MODELS = {
 		},
 		contextWindow: 200000,
 		maxTokens: 131072,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"glm-5.1": {
 		id: "glm-5.1",
@@ -75,6 +78,7 @@ export const ZAI_MODELS = {
 		},
 		contextWindow: 200000,
 		maxTokens: 131072,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"glm-5.2": {
 		id: "glm-5.2",
@@ -94,6 +98,7 @@ export const ZAI_MODELS = {
 		},
 		contextWindow: 1000000,
 		maxTokens: 131072,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"glm-5v-turbo": {
 		id: "glm-5v-turbo",
@@ -112,5 +117,6 @@ export const ZAI_MODELS = {
 		},
 		contextWindow: 200000,
 		maxTokens: 131072,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 } as const;

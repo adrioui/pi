@@ -21,6 +21,7 @@ export const CEREBRAS_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 40960,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"zai-glm-4.7": {
 		id: "zai-glm-4.7",
@@ -39,5 +40,6 @@ export const CEREBRAS_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 40960,
+		grammar: true,
 	} satisfies Model<"openai-completions">,
 } as const;
