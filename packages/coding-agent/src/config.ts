@@ -560,6 +560,26 @@ export function getSessionsDir(): string {
 	return join(getAgentDir(), "sessions");
 }
 
+/** Get path to taste storage directory */
+export function getTasteDir(): string {
+	return join(getAgentDir(), "taste");
+}
+
+/** Get path to daemon runtime directory */
+export function getDaemonDir(): string {
+	return join(getAgentDir(), "daemon");
+}
+
+/** Get path to daemon unix socket */
+export function getDaemonSocketPath(): string {
+	return join(getDaemonDir(), `${APP_NAME}.sock`);
+}
+
+/** Get path to daemon pid file */
+export function getDaemonPidPath(): string {
+	return join(getDaemonDir(), `${APP_NAME}.pid`);
+}
+
 /** Get path to debug log file */
 export function getDebugLogPath(): string {
 	return join(getAgentDir(), `${APP_NAME}-debug.log`);

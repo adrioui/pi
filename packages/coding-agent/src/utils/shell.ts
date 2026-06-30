@@ -119,7 +119,7 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 	return { shell: "sh", args: ["-c"] };
 }
 
-export function getShellEnv(): NodeJS.ProcessEnv {
+export function getShellEnv(cwd?: string): NodeJS.ProcessEnv {
 	const binDir = getBinDir();
 	const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
 	const currentPath = process.env[pathKey] ?? "";
@@ -130,6 +130,9 @@ export function getShellEnv(): NodeJS.ProcessEnv {
 	return {
 		...process.env,
 		[pathKey]: updatedPath,
+		NO_COLOR: "1",
+		PROJECT_ROOT: cwd ?? process.cwd(),
+		M: process.env.PI_SCRATCHPAD_DIR ?? "",
 	};
 }
 

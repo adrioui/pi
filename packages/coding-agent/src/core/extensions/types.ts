@@ -447,6 +447,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	parameters: TParams;
 	/** Controls whether ToolExecutionComponent renders the standard colored shell or the tool renders its own framing. */
 	renderShell?: "default" | "self";
+	/** When true, the tool is callable but hidden from the system prompt's tool documentation. */
+	hidden?: boolean;
 
 	/** Optional compatibility shim to prepare raw tool call arguments before schema validation. Must return an object conforming to TParams. */
 	prepareArguments?: (args: unknown) => Static<TParams>;
