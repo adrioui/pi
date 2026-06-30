@@ -799,10 +799,7 @@ export class SessionManager {
 			// to avoid appending messages without a session header (which breaks the session)
 			if (this.fileEntries.length === 0) {
 				const explicitPath = this.sessionFile;
-				this.newSession();
-				this.sessionFile = explicitPath;
-				this._rewriteFile();
-				this.flushed = true;
+				this._newSession(undefined, explicitPath);
 				return;
 			}
 
@@ -817,12 +814,15 @@ export class SessionManager {
 			this.flushed = true;
 		} else {
 			const explicitPath = this.sessionFile;
-			this.newSession();
-			this.sessionFile = explicitPath; // preserve explicit path from --session flag
+			this._newSession(undefined, explicitPath);
 		}
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
+		return this._newSession(options);
+	}
+
+	private _newSession(options?: NewSessionOptions, sessionFileOverride?: string): string | undefined {
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
 		}
@@ -839,12 +839,16 @@ export class SessionManager {
 		this.fileEntries = [header];
 		this.byId.clear();
 		this.labelsById.clear();
+		this.labelTimestampsById.clear();
 		this.leafId = null;
 		this.flushed = false;
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
-			this.sessionFile = join(this.getSessionDir(), `${fileTimestamp}_${this.sessionId}.jsonl`);
+			this.sessionFile =
+				sessionFileOverride ?? join(this.getSessionDir(), `${fileTimestamp}_${this.sessionId}.jsonl`);
+			this._rewriteFile();
+			this.flushed = true;
 		}
 		return this.sessionFile;
 	}
@@ -906,33 +910,34 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
+	getSessionMetaFile(): string | undefined {
+		return this.createSidecarPath(".meta.json");
+	}
+
+	getSessionEventsFile(): string | undefined {
+		return this.createSidecarPath(".events.jsonl");
+	}
+
+	getSessionProjectionsFile(): string | undefined {
+		return this.createSidecarPath(".projections.json");
+	}
+
+	private createSidecarPath(suffix: string): string | undefined {
+		if (!this.sessionFile) return undefined;
+		if (this.sessionFile.endsWith(".jsonl")) {
+			return this.sessionFile.slice(0, -".jsonl".length) + suffix;
+		}
+		return `${this.sessionFile}${suffix}`;
+	}
+
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
-
-		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-		if (!hasAssistant) {
-			if (this.flushed) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
-			} else {
-				// Mark as not flushed so when assistant arrives, all entries get written
-				this.flushed = false;
-			}
+		if (!this.flushed || !existsSync(this.sessionFile)) {
+			this._rewriteFile();
+			this.flushed = true;
 			return;
 		}
-
-		if (!this.flushed) {
-			const fd = openSync(this.sessionFile, "wx");
-			try {
-				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
-				}
-			} finally {
-				closeSync(fd);
-			}
-			this.flushed = true;
-		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
-		}
+		appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
@@ -1351,18 +1356,8 @@ export class SessionManager {
 			this.sessionFile = newSessionFile;
 			this._buildIndex();
 
-			// Only write the file now if it contains an assistant message.
-			// Otherwise defer to _persist(), which creates the file on the
-			// first assistant response, matching the newSession() contract
-			// and avoiding the duplicate-header bug when _persist()'s
-			// no-assistant guard later resets flushed to false.
-			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-			if (hasAssistant) {
-				this._rewriteFile();
-				this.flushed = true;
-			} else {
-				this.flushed = false;
-			}
+			this._rewriteFile();
+			this.flushed = true;
 
 			return newSessionFile;
 		}
