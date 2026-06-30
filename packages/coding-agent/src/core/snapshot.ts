@@ -9,8 +9,8 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 /**
  * Returns true if `dir` is inside a git work tree.
@@ -28,6 +28,81 @@ export function isGitRepo(dir: string): boolean {
 	}
 }
 
+export type VcsOperation =
+	| "commit"
+	| "revert"
+	| "cherry-pick"
+	| "diff"
+	| "log"
+	| "status"
+	| "branch"
+	| "checkout"
+	| "switch"
+	| "restore"
+	| "reset"
+	| "stash"
+	| "tag"
+	| "show"
+	| "merge"
+	| "rebase"
+	| "add"
+	| "clean";
+
+export const SUPPORTED_VCS_OPERATIONS: VcsOperation[] = [
+	"commit",
+	"revert",
+	"cherry-pick",
+	"diff",
+	"log",
+	"status",
+	"branch",
+	"checkout",
+	"switch",
+	"restore",
+	"reset",
+	"stash",
+	"tag",
+	"show",
+	"merge",
+	"rebase",
+	"add",
+	"clean",
+];
+
+export function isSafeVcsWorkspace(workspaceRoot: string): boolean {
+	const resolved = resolve(workspaceRoot);
+	const home = resolve(process.env.HOME || homedir());
+	const relativePath = relative(home, resolved);
+	return (
+		resolved !== "/" &&
+		resolved !== home &&
+		relativePath !== "" &&
+		!relativePath.startsWith("..") &&
+		!isAbsolute(relativePath)
+	);
+}
+
+export function shouldEnableGitTracking(workspaceRoot: string): boolean {
+	if (!isSafeVcsWorkspace(workspaceRoot) || !isGitRepo(workspaceRoot)) return false;
+	try {
+		const count = Number.parseInt(
+			execFileSync("git", ["ls-files"], { cwd: workspaceRoot, encoding: "utf-8", stdio: "pipe" })
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.length.toString(),
+			10,
+		);
+		if (count > 50000) {
+			console.warn(`VCS tracking disabled for large repo (${count} files > 50000 threshold)`);
+			return false;
+		}
+		return count <= 100000;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Create a git tree snapshot of the working directory.
  *
@@ -40,7 +115,7 @@ export function isGitRepo(dir: string): boolean {
  * Returns the tree OID, or null if not a git repo or the git commands fail.
  */
 export function createSnapshot(workspaceRoot: string, sessionId: string, messageId: string): string | null {
-	if (!isGitRepo(workspaceRoot)) {
+	if (!shouldEnableGitTracking(workspaceRoot)) {
 		return null;
 	}
 
@@ -135,11 +210,11 @@ export function restoreSnapshot(workspaceRoot: string, treeOID: string, path?: s
 	const checkoutPath = path || ".";
 	// Remove untracked files not in the snapshot, except .git and pi internal dirs
 	try {
-		execFileSync(
-			"git",
-			["clean", "-f", "-e", ".git", "-e", ".pi", checkoutPath === "." ? "" : checkoutPath].filter(Boolean),
-			{ cwd: workspaceRoot, stdio: "pipe" },
-		);
+		const cleanArgs = ["clean", "-f", "-e", ".git", "-e", ".pi"];
+		if (checkoutPath !== ".") {
+			cleanArgs.push("--", checkoutPath);
+		}
+		execFileSync("git", cleanArgs, { cwd: workspaceRoot, stdio: "pipe" });
 	} catch {
 		// Ignore clean errors; checkout will still overwrite tracked files
 	}

@@ -37,6 +37,10 @@ export const GUARDED_PATH_PATTERNS: readonly string[] = [
 	"**/.amp",
 	"**/.amp/**",
 
+	// Taste profile files
+	"**/.pi/taste/taste.md",
+	"**/.pi/taste/**/taste.md",
+
 	// System directories
 	"/etc",
 	"/etc/**",
@@ -114,7 +118,8 @@ function pathMatchesGlob(pattern: string, filePath: string): boolean {
 function escapeGlobToRegex(part: string): string {
 	let result = "";
 	for (let i = 0; i < part.length; i++) {
-		const ch = part[i]!;
+		const ch = part[i];
+		if (ch === undefined) continue;
 		if (ch === "*") {
 			result += "[^/]*";
 		} else if (ch === "?") {
@@ -163,7 +168,7 @@ function extractPathsFromCommand(command: string): string[] {
 		// Handle redirect operators with attached targets: >foo, >>foo, 2>foo, etc.
 		const redirectMatch = /^\d*(>+)(.*)/.exec(token);
 		if (redirectMatch) {
-			const target = redirectMatch[2]!;
+			const target = redirectMatch[2];
 			if (target) {
 				paths.push(stripQuotes(target));
 			}

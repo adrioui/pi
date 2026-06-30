@@ -123,6 +123,18 @@ export interface Settings {
 	experimental?: ExperimentalSettings;
 	subagents?: SubagentSettings;
 	warnings?: WarningSettings;
+	tasteLearning?: boolean;
+	tasteOnboarding?: {
+		completed?: boolean;
+		skipped?: boolean;
+		learnedSessions?: Record<string, string[]>;
+		skippedSessions?: Record<string, string[]>;
+		lastLearningDate?: string;
+	};
+	showTasteOnboarding?: boolean;
+	autoLearnTaste?: boolean;
+	tasteOnboardingEntryId?: string;
+	featureModels?: Record<string, string>;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpProxy?: string; // Proxy URL applied as HTTP_PROXY and HTTPS_PROXY for Pi-managed HTTP clients
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
@@ -656,6 +668,10 @@ export class SettingsManager {
 		const drained = [...this.errors];
 		this.errors = [];
 		return drained;
+	}
+
+	getRawSettings(): Settings {
+		return structuredClone(this.settings);
 	}
 
 	getLastChangelogVersion(): string | undefined {
