@@ -9,6 +9,7 @@ export interface ModelCapabilities {
 	toolCacheControl: boolean;
 	strictTools: boolean;
 	parallelToolCalls: boolean;
+	grammar: boolean;
 }
 
 const LONG_CONTEXT_THRESHOLD = 200_000;
@@ -37,5 +38,6 @@ export function deriveModelCapabilities(model: Model<Api>): ModelCapabilities {
 		toolCacheControl,
 		strictTools,
 		parallelToolCalls: true,
+		grammar: model.grammar === true,
 	};
 }

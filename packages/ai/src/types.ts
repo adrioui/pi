@@ -349,6 +349,8 @@ export interface ToolCall {
 	name: string;
 	arguments: Record<string, any>;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
+	/** Internal: accumulated partial JSON during streaming (not part of the final message). */
+	partialJson?: string;
 }
 
 export interface Usage {
@@ -681,6 +683,10 @@ export interface Model<TApi extends Api> {
 	contextWindow: number;
 	maxTokens: number;
 	headers?: Record<string, string>;
+	/** Whether this model supports GBNF grammar-constrained generation (open-weight models via llama.cpp/vLLM). */
+	grammar?: boolean;
+	/** Provider-specific field name for grammar injection (e.g. "guided_grammar" for vLLM). Defaults to "grammar". */
+	grammarField?: string;
 	/** Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from baseUrl. */
 	compat?: TApi extends "openai-completions"
 		? OpenAICompletionsCompat
