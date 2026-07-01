@@ -1242,10 +1242,9 @@ export class AgentSession {
 		}
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const multiAgentEnabled = process.env.PI_ENABLE_MULTI_AGENT !== "0";
 		const appendParts: string[] = [];
 		if (loaderAppendSystemPrompt.length > 0) appendParts.push(loaderAppendSystemPrompt.join("\n\n"));
-		if (multiAgentEnabled) appendParts.push(LEADER_PROMPT);
+		appendParts.push(LEADER_PROMPT);
 		const appendSystemPrompt = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
@@ -1469,7 +1468,7 @@ export class AgentSession {
 					{
 						customType: "advisor-message",
 						content:
-							"<advisor>Use /settings to configure thinking level and transport. Use 'pi taste learn --provider <p> --model <m>' from the CLI to configure the taste learning model. Multi-agent role-control tools are enabled by default. Set PI_ENABLE_MULTI_AGENT=0 to disable.</advisor>",
+							"<advisor>Use /settings to configure thinking level and transport. Use 'pi taste learn --provider <p> --model <m>' from the CLI to configure the taste learning model. Multi-agent role-control tools are enabled by default.</advisor>",
 						display: false,
 					},
 					undefined,
@@ -2897,7 +2896,7 @@ export class AgentSession {
 			}
 		}
 		// Register scratchpad tools (always available)
-		if (isAllowedBuiltinAddon("scratchpad_save")) {
+		if (builtinsAvailable && isAllowedTool("scratchpad_save")) {
 			const saveDef = createScratchpadSaveToolDefinition(this._scratchpad);
 			const saveEntry: ToolDefinitionEntry = {
 				definition: saveDef,
@@ -2911,7 +2910,7 @@ export class AgentSession {
 				wrapToolDefinition(saveDef, () => runner.createContext()),
 			);
 		}
-		if (isAllowedBuiltinAddon("scratchpad_load")) {
+		if (builtinsAvailable && isAllowedTool("scratchpad_load")) {
 			const loadDef = createScratchpadLoadToolDefinition(this._scratchpad);
 			const loadEntry: ToolDefinitionEntry = {
 				definition: loadDef,
@@ -2925,7 +2924,7 @@ export class AgentSession {
 				wrapToolDefinition(loadDef, () => runner.createContext()),
 			);
 		}
-		if (isAllowedBuiltinAddon("web_search")) {
+		if (builtinsAvailable && isAllowedTool("web_search")) {
 			const webSearchDef = createWebSearchToolDefinition();
 			this._toolDefinitions.set("web_search", {
 				definition: webSearchDef,
@@ -2938,7 +2937,7 @@ export class AgentSession {
 				wrapToolDefinition(webSearchDef, () => runner.createContext()),
 			);
 		}
-		if (isAllowedBuiltinAddon("web_fetch")) {
+		if (builtinsAvailable && isAllowedTool("web_fetch")) {
 			const webFetchDef = createWebFetchToolDefinition();
 			this._toolDefinitions.set("web_fetch", {
 				definition: webFetchDef,
@@ -2952,32 +2951,30 @@ export class AgentSession {
 			);
 		}
 
-		// Register role-control tools when multi-agent mode is enabled
-		const multiAgentEnabled = process.env.PI_ENABLE_MULTI_AGENT !== "0";
-		if (multiAgentEnabled) {
-			const roleTools = [
-				["spawnWorker", createSpawnWorkerToolDefinition()],
-				["killWorker", createKillWorkerToolDefinition()],
-				["messageWorker", createMessageWorkerToolDefinition()],
-				["createTask", createCreateTaskToolDefinition()],
-				["updateTask", createUpdateTaskToolDefinition()],
-				["finishGoal", createFinishGoalToolDefinition()],
-				["reassignWorker", createReassignWorkerToolDefinition()],
-				["messageAdvisor", createMessageAdvisorToolDefinition()],
-			] as const;
-			for (const [toolName, toolDef] of roleTools) {
-				if (!isAllowedBuiltinAddon(toolName)) continue;
-				this._toolDefinitions.set(toolName, {
-					definition: toolDef,
-					sourceInfo: createSyntheticSourceInfo(`<builtin:${toolName}>`, {
-						source: "builtin",
-					}),
-				});
-				toolRegistry.set(
-					toolName,
-					wrapToolDefinition(toolDef, () => runner.createContext()),
-				);
-			}
+		// Register role-control tools by default. They are part of the core multi-agent runtime,
+		// not optional addons that require a --tools allowlist.
+		const roleTools = [
+			["spawnWorker", createSpawnWorkerToolDefinition()],
+			["killWorker", createKillWorkerToolDefinition()],
+			["messageWorker", createMessageWorkerToolDefinition()],
+			["createTask", createCreateTaskToolDefinition()],
+			["updateTask", createUpdateTaskToolDefinition()],
+			["finishGoal", createFinishGoalToolDefinition()],
+			["reassignWorker", createReassignWorkerToolDefinition()],
+			["messageAdvisor", createMessageAdvisorToolDefinition()],
+		] as const;
+		for (const [toolName, toolDef] of roleTools) {
+			if (!builtinsAvailable || !isAllowedTool(toolName)) continue;
+			this._toolDefinitions.set(toolName, {
+				definition: toolDef,
+				sourceInfo: createSyntheticSourceInfo(`<builtin:${toolName}>`, {
+					source: "builtin",
+				}),
+			});
+			toolRegistry.set(
+				toolName,
+				wrapToolDefinition(toolDef, () => runner.createContext()),
+			);
 		}
 		this._toolRegistry = toolRegistry;
 
@@ -3000,8 +2997,28 @@ export class AgentSession {
 			nextActiveToolNames.push("checkpoint_changes");
 		}
 
-		// Scratchpad tools are always available
-		for (const name of ["scratchpad_save", "scratchpad_load"]) {
+		for (const name of [
+			"spawnWorker",
+			"killWorker",
+			"messageWorker",
+			"createTask",
+			"updateTask",
+			"finishGoal",
+			"reassignWorker",
+			"messageAdvisor",
+		]) {
+			if (
+				builtinsAvailable &&
+				isAllowedTool(name) &&
+				this._toolRegistry.has(name) &&
+				!nextActiveToolNames.includes(name)
+			) {
+				nextActiveToolNames.push(name);
+			}
+		}
+
+		// Scratchpad and web tools are core Magnitude-parity tools.
+		for (const name of ["scratchpad_save", "scratchpad_load", "web_search", "web_fetch"]) {
 			if (isAllowedTool(name) && !nextActiveToolNames.includes(name)) {
 				nextActiveToolNames.push(name);
 			}

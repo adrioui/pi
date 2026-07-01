@@ -40,7 +40,10 @@ const TOOL_HANDLERS: Record<string, RoleToolHandler> = {
 			taskId: p.taskId as string | undefined,
 			context: p.context as string | undefined,
 		});
-		return success(`Spawned ${result.forkId}`, result);
+		return success(`Spawned worker ${result.agentId} (fork ${result.forkId})`, {
+			...result,
+			workerId: result.agentId,
+		});
 	},
 	messageWorker: async (rt, p) => {
 		await rt.messageWorker({ workerId: String(p.workerId ?? ""), message: String(p.message ?? "") });
@@ -178,11 +181,6 @@ export function createRoleControlTool(name: string, description: string): ToolDe
 			try {
 				const runtime = getRuntime(ctx);
 				if (!runtime) {
-					if (process.env.PI_ENABLE_MULTI_AGENT === "0") {
-						return errorResult(
-							"Multi-agent mode is disabled (PI_ENABLE_MULTI_AGENT=0 is set). Unset this environment variable to enable role-control tools.",
-						);
-					}
 					return errorResult("Multi-agent runtime not registered. Role control tools are unavailable.");
 				}
 				return await handler(runtime, params as Record<string, unknown>);

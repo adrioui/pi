@@ -572,66 +572,64 @@ export class SessionOrchestrator {
 		});
 		registerForkRuntime(session.sessionId, this.forkRuntime);
 
-		// Register WorkerExecutor when multi-agent is enabled
-		if (process.env.PI_ENABLE_MULTI_AGENT !== "0") {
-			this.workerExecutor = new WorkerExecutor({
-				resolveModel: (role: string) => {
-					const resolver = new AgentModelResolver(this.services);
-					return resolver.resolve(role) as Model<string> | undefined;
-				},
-				getSystemPrompt: (role: string) => getSystemPrompt(role),
-				getAllTools: () => this.session.getExecutableWorkerTools(),
-				getProjectContext: () => collectFolderStructure(this.session.sessionManager.getCwd()),
-				getTranscript: () =>
-					this.session.agent.state.messages
-						.slice(-10)
-						.map((message) => `${message.role}: ${textFromMessage(message)}`)
-						.filter((line) => line.trim().length > 0)
-						.join("\n\n"),
-				publishEvent: (type, payload) => this.publishRuntimeEvent(type, payload),
-				userRules: this.session.getUserPermissionRules(),
-				forkedProjectionStore: this.forkedProjectionStore,
-				onWorkerFinished: (result) => {
-					void this.publishRuntimeEvent("worker_finished", {
-						agentId: result.agentId,
-						forkId: result.forkId,
-						role: result.role,
-						result: result.text,
-					}).catch(() => {});
+		// Register WorkerExecutor unconditionally. Multi-agent workers are core runtime behavior.
+		this.workerExecutor = new WorkerExecutor({
+			resolveModel: (role: string) => {
+				const resolver = new AgentModelResolver(this.services);
+				return resolver.resolve(role) as Model<string> | undefined;
+			},
+			getSystemPrompt: (role: string) => getSystemPrompt(role),
+			getAllTools: () => this.session.getExecutableWorkerTools(),
+			getProjectContext: () => collectFolderStructure(this.session.sessionManager.getCwd()),
+			getTranscript: () =>
+				this.session.agent.state.messages
+					.slice(-10)
+					.map((message) => `${message.role}: ${textFromMessage(message)}`)
+					.filter((line) => line.trim().length > 0)
+					.join("\n\n"),
+			publishEvent: (type, payload) => this.publishRuntimeEvent(type, payload),
+			userRules: this.session.getUserPermissionRules(),
+			forkedProjectionStore: this.forkedProjectionStore,
+			onWorkerFinished: (result) => {
+				void this.publishRuntimeEvent("worker_finished", {
+					agentId: result.agentId,
+					forkId: result.forkId,
+					role: result.role,
+					result: result.text,
+				}).catch(() => {});
+				void this.session
+					.sendCustomMessage(
+						{
+							customType: "worker-result",
+							content: `<worker_result role="${result.role}">\n${result.text}\n</worker_result>`,
+							display: true,
+						},
+						undefined,
+					)
+					.catch(() => {});
+				const guidance = COORDINATOR_ON_IDLE[result.role];
+				if (guidance) {
 					void this.session
 						.sendCustomMessage(
 							{
-								customType: "worker-result",
-								content: `<worker_result role="${result.role}">\n${result.text}\n</worker_result>`,
-								display: true,
+								customType: "coordinator-guidance",
+								content: guidance,
+								display: false,
 							},
 							undefined,
 						)
 						.catch(() => {});
-					const guidance = COORDINATOR_ON_IDLE[result.role];
-					if (guidance) {
-						void this.session
-							.sendCustomMessage(
-								{
-									customType: "coordinator-guidance",
-									content: guidance,
-									display: false,
-								},
-								undefined,
-							)
-							.catch(() => {});
-					}
-				},
-				onWorkerError: (error) => {
-					void this.publishRuntimeEvent("worker_error", {
-						agentId: error.agentId,
-						forkId: error.forkId,
-						error: error.error,
-					}).catch(() => {});
-				},
-			});
-			this.sink.registerRole(this.workerExecutor.asRole());
-		}
+				}
+			},
+			onWorkerError: (error) => {
+				void this.publishRuntimeEvent("worker_error", {
+					agentId: error.agentId,
+					forkId: error.forkId,
+					error: error.error,
+				}).catch(() => {});
+			},
+		});
+		this.sink.registerRole(this.workerExecutor.asRole());
 	}
 
 	async initialize(): Promise<void> {
