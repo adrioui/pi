@@ -20,9 +20,17 @@ import {
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
 	type BeforeToolCallResult,
+	type StreamFn,
 } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
-import { composePayloadHooks, createGrammarInjector, createStructuredOutputInjector } from "@earendil-works/pi-ai";
+import {
+	composePayloadHooks,
+	createGrammarInjector,
+	createStructuredOutputInjector,
+	formatCorrectiveFeedback,
+	StreamingFieldParser,
+	typeboxToStreamingSchema,
+} from "@earendil-works/pi-ai";
 import type { AssistantMessage } from "@earendil-works/pi-ai/compat";
 import { ROLE_DEFINITIONS } from "@earendil-works/pi-event-core";
 import type { TSchema } from "typebox";
@@ -54,6 +62,7 @@ export interface WorkerSessionConfig {
 	contextLimit: number;
 	maxTurns?: number;
 	userRules?: PermissionRule[];
+	streamFn?: StreamFn;
 	publishEvent?: (type: string, payload: Record<string, unknown>) => Promise<void> | void;
 	onFinished: (result: { text: string; forkId: string; agentId: string; stopReason?: string }) => void;
 	onError: (error: { error: string; forkId: string; agentId: string }) => void;
@@ -80,7 +89,12 @@ export class WorkerSession {
 	private readonly errorGuard = new ErrorRepeatGuard({ threshold: 3 });
 	private thinkingCharCount = 0;
 	private turnCount = 0;
+	private stoppedForMaxTurns = false;
 	private readonly maxTurns: number;
+	private readonly streamingParsers = new Map<string, StreamingFieldParser>();
+	private pendingToolValidationFeedback: string | undefined = undefined;
+	private retryAttempt = 0;
+	private readonly maxValidationRetries = 3;
 
 	constructor(config: WorkerSessionConfig) {
 		this.config = config;
@@ -112,6 +126,7 @@ export class WorkerSession {
 				],
 			},
 			onPayload,
+			streamFn: config.streamFn,
 			toolExecution: "parallel",
 			transformContext: async (messages, signal) => this.compactContext(messages, signal),
 		});
@@ -142,7 +157,7 @@ export class WorkerSession {
 
 	async start(): Promise<void> {
 		try {
-			await this.agent.continue();
+			await this.runUntilIdle();
 		} catch (err) {
 			this.unsubscribe();
 			this.config.onError({
@@ -158,6 +173,15 @@ export class WorkerSession {
 		// Check final state
 		const messages = this.agent.state.messages;
 		const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant") as AssistantMessage | undefined;
+
+		if (this.stoppedForMaxTurns) {
+			this.config.onError({
+				error: `Worker reached maximum turns (${this.maxTurns})`,
+				forkId: this.config.forkId,
+				agentId: this.config.agentId,
+			});
+			return;
+		}
 
 		if (this.agent.signal?.aborted || lastAssistant?.stopReason === "aborted") {
 			this.config.onError({
@@ -190,9 +214,18 @@ export class WorkerSession {
 
 	private async handleAgentEvent(event: AgentEvent, _signal: AbortSignal): Promise<void> {
 		switch (event.type) {
+			case "message_update":
+				this.handleMessageUpdate(event);
+				break;
+
 			case "message_end":
 				if (event.message.role === "assistant") {
 					const msg = event.message as AssistantMessage;
+					if (this.pendingToolValidationFeedback !== undefined) {
+						msg.stopReason = "error";
+						msg.errorMessage = this.pendingToolValidationFeedback;
+						this.pendingToolValidationFeedback = undefined;
+					}
 					this.checkThinkingBudget(msg);
 					const text = this.extractText(msg);
 					await this.publishEvent("message_end", {
@@ -243,13 +276,116 @@ export class WorkerSession {
 			case "turn_end":
 				this.turnCount++;
 				if (this.turnCount >= this.maxTurns) {
+					this.stoppedForMaxTurns = true;
 					this.agent.abort();
 				}
 				break;
 
 			case "agent_end":
+				this.streamingParsers.clear();
 				// start() await resolves after this
 				break;
+		}
+	}
+
+	private async runUntilIdle(): Promise<void> {
+		await this.agent.continue();
+
+		while (this.shouldRetryToolValidation()) {
+			const feedback = this.consumeToolValidationFeedback();
+			this.removeLastAssistantMessage();
+			this.agent.steer({
+				role: "user",
+				content: feedback,
+				timestamp: Date.now(),
+			} as AgentMessage);
+			await this.publishEvent("worker_retry", {
+				reason: "tool_validation",
+				attempt: this.retryAttempt,
+				maxAttempts: this.maxValidationRetries,
+			});
+			await this.agent.continue();
+		}
+
+		if (this.retryAttempt > 0) {
+			this.retryAttempt = 0;
+		}
+	}
+
+	private handleMessageUpdate(event: Extract<AgentEvent, { type: "message_update" }>): void {
+		const update = event.assistantMessageEvent as {
+			type?: string;
+			delta?: string;
+			contentIndex?: number;
+		};
+		if (update.type === "toolcall_delta" && update.delta) {
+			this.handleToolCallDelta(event, update);
+		}
+		if (update.type === "toolcall_end") {
+			const ended = event.assistantMessageEvent as { toolCall?: { id?: string } };
+			if (ended.toolCall?.id) {
+				this.streamingParsers.delete(ended.toolCall.id);
+			}
+		}
+	}
+
+	private handleToolCallDelta(
+		event: Extract<AgentEvent, { type: "message_update" }>,
+		update: { delta?: string; contentIndex?: number },
+	): void {
+		const message = event.message as { content?: Array<{ type: string; id?: string; name?: string }> };
+		const contentIndex = update.contentIndex ?? 0;
+		const content = message.content?.[contentIndex];
+		if (!content || content.type !== "toolCall" || !content.id || !content.name) return;
+
+		let parser = this.streamingParsers.get(content.id);
+		if (!parser) {
+			const tool = this.agent.state.tools.find((entry) => entry.name === content.name);
+			if (!tool) return;
+			try {
+				parser = new StreamingFieldParser(typeboxToStreamingSchema(tool.parameters));
+			} catch {
+				return;
+			}
+			this.streamingParsers.set(content.id, parser);
+		}
+
+		parser.push(update.delta ?? "");
+
+		if (!parser.valid) {
+			const feedback = formatCorrectiveFeedback(parser.getValidationState());
+			this.pendingToolValidationFeedback = `tool_validation: ${feedback}`;
+			this.agent.abort();
+			void this.publishEvent("tool_validation_failed", {
+				toolName: content.name,
+				toolCallId: content.id,
+				errors: [parser.validationIssue ?? "Unknown validation error"],
+			}).catch(() => {});
+			this.streamingParsers.clear();
+		}
+	}
+
+	private shouldRetryToolValidation(): boolean {
+		const message = this.lastAssistantMessage();
+		if (message?.stopReason !== "error" || !message.errorMessage?.startsWith("tool_validation:")) {
+			return false;
+		}
+		this.retryAttempt++;
+		return this.retryAttempt <= this.maxValidationRetries;
+	}
+
+	private consumeToolValidationFeedback(): string {
+		const message = this.lastAssistantMessage();
+		return (
+			message?.errorMessage?.slice("tool_validation:".length).trim() ||
+			"Your previous tool call had invalid arguments. Try again with arguments that match the tool schema."
+		);
+	}
+
+	private removeLastAssistantMessage(): void {
+		const messages = this.agent.state.messages;
+		if (messages[messages.length - 1]?.role === "assistant") {
+			this.agent.state.messages = messages.slice(0, -1);
 		}
 	}
 
@@ -388,6 +524,17 @@ export class WorkerSession {
 			if (message?.role !== "assistant") continue;
 			const text = textFromContent((message as { content: unknown }).content);
 			if (text) return text;
+		}
+		return undefined;
+	}
+
+	private lastAssistantMessage(): AssistantMessage | undefined {
+		const messages = this.agent.state.messages;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message?.role === "assistant") {
+				return message as AssistantMessage;
+			}
 		}
 		return undefined;
 	}

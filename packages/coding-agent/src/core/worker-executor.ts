@@ -225,7 +225,6 @@ export class WorkerExecutor {
 		this.intentionallyKilled.add(payload.agentId);
 		session.kill();
 		this.detachedRegistry.killAll(payload.forkId);
-		this.cleanupWorker(payload.forkId, payload.agentId);
 	}
 
 	private cleanupWorker(forkId: string, agentId: string): void {

@@ -1,10 +1,51 @@
+import type { AgentEvent } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { DetachedProcessRegistry } from "../../../src/core/detached-process-registry.ts";
 import { IdenticalContinueTracker } from "../../../src/core/identical-continue-tracker.ts";
 import { buildWorkerContext } from "../../../src/core/worker-context-builder.ts";
+import { WorkerExecutor } from "../../../src/core/worker-executor.ts";
 import { WorkerSession, type WorkerTool } from "../../../src/core/worker-session.ts";
 import { filterToolsForRole } from "../../../src/core/worker-tools.ts";
+
+function createWorkerTestModel(): Model<string> {
+	return {
+		id: "test-model",
+		name: "Test",
+		api: "openai-completions",
+		provider: "faux",
+		baseUrl: "http://localhost",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 4096,
+	};
+}
+
+function createAssistantMessage(
+	content: AssistantMessage["content"],
+	stopReason: AssistantMessage["stopReason"],
+): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: "openai-completions",
+		provider: "faux",
+		model: "test-model",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason,
+		timestamp: Date.now(),
+	};
+}
 
 describe("WorkerSession", () => {
 	it("creates and runs to completion", async () => {
@@ -77,6 +118,93 @@ describe("WorkerSession", () => {
 		// Should not throw
 		session.deliverMessage("New task: check files.");
 		session.kill();
+	});
+
+	it("marks invalid worker tool-call streams with corrective validation feedback", async () => {
+		const publishEvents: string[] = [];
+		const session = new WorkerSession({
+			forkId: "fork1",
+			agentId: "agent1",
+			role: "scout",
+			model: createWorkerTestModel(),
+			systemPrompt: "You are a scout.",
+			initialMessage: "Read the file.",
+			tools: [
+				{
+					name: "read",
+					description: "Read files",
+					parameters: Type.Object({ path: Type.String() }),
+					execute: async () => ({ content: [{ type: "text", text: "file" }], details: null }),
+				},
+			],
+			contextLimit: 128000,
+			maxTurns: 5,
+			publishEvent: async (type) => {
+				publishEvents.push(type);
+			},
+			onFinished: () => {},
+			onError: () => {},
+		});
+
+		const partial = createAssistantMessage(
+			[{ type: "toolCall", id: "call-1", name: "read", arguments: {} }],
+			"toolUse",
+		);
+		const internals = session as unknown as {
+			handleAgentEvent(event: AgentEvent, signal: AbortSignal): Promise<void>;
+		};
+
+		await internals.handleAgentEvent(
+			{
+				type: "message_update",
+				message: partial,
+				assistantMessageEvent: {
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: '{"path":123}',
+					partial,
+				},
+			},
+			new AbortController().signal,
+		);
+
+		const aborted = createAssistantMessage(partial.content, "aborted");
+		await internals.handleAgentEvent({ type: "message_end", message: aborted }, new AbortController().signal);
+
+		expect(aborted.stopReason).toBe("error");
+		expect(aborted.errorMessage).toContain("tool_validation:");
+		expect(publishEvents).toContain("tool_validation_failed");
+	});
+});
+
+describe("WorkerExecutor", () => {
+	it("does not clean up a killed worker before its session settles", async () => {
+		let killed = false;
+		const executor = new WorkerExecutor({
+			resolveModel: () => undefined,
+			getSystemPrompt: () => "",
+			getAllTools: () => [],
+			getProjectContext: () => "",
+			getTranscript: () => "",
+			publishEvent: async () => {},
+			onWorkerFinished: () => {},
+			onWorkerError: () => {},
+		});
+		const internals = executor as unknown as {
+			workers: Map<string, { kill(): void }>;
+			onWorkerKilled(event: { payload: { agentId: string; forkId: string } }): Promise<void>;
+		};
+		internals.workers.set("agent1", {
+			kill: () => {
+				killed = true;
+			},
+		});
+
+		await internals.onWorkerKilled({ payload: { agentId: "agent1", forkId: "fork1" } });
+
+		expect(killed).toBe(true);
+		expect(internals.workers.has("agent1")).toBe(true);
+		executor.dispose();
 	});
 });
 
