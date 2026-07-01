@@ -108,6 +108,7 @@ export async function executeBashWithOperations(
 		const result = await operations.exec(command, cwd, {
 			onData,
 			signal: options?.signal,
+			env: { ...process.env, NO_COLOR: "1", PROJECT_ROOT: cwd, M: process.env.M ?? "" },
 		});
 
 		const fullOutput = outputChunks.join("");

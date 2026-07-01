@@ -139,7 +139,11 @@ export interface BashSpawnContext {
 export type BashSpawnHook = (context: BashSpawnContext) => BashSpawnContext;
 
 function resolveSpawnContext(command: string, cwd: string, spawnHook?: BashSpawnHook): BashSpawnContext {
-	const baseContext: BashSpawnContext = { command, cwd, env: { ...getShellEnv() } };
+	const baseContext: BashSpawnContext = {
+		command,
+		cwd,
+		env: { ...getShellEnv(), NO_COLOR: "1", PROJECT_ROOT: cwd, M: process.env.M ?? "" },
+	};
 	return spawnHook ? spawnHook(baseContext) : baseContext;
 }
 
