@@ -8,6 +8,7 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { type Static, Type } from "typebox";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import { isBlockedUrlResolved } from "./web-fetch.ts";
 
 const webSearchSchema = Type.Object({
 	query: Type.String({ description: "Search query" }),
@@ -45,13 +46,22 @@ function parseDuckDuckGoHtml(html: string, maxResults: number): SearchResult[] {
 	return results;
 }
 
-async function searchDuckDuckGo(query: string, maxResults: number): Promise<SearchResult[]> {
+async function searchDuckDuckGo(query: string, maxResults: number, signal?: AbortSignal): Promise<SearchResult[]> {
 	const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-	const proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.https_proxy;
-	const fetchUrl = proxyUrl ? `${proxyUrl}${url}` : url;
+	const proxyUrl =
+		process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+	if (proxyUrl && (await isBlockedUrlResolved(proxyUrl))) {
+		throw new Error("Proxy URL is blocked by SSRF protection");
+	}
+	const fetchUrl = proxyUrl
+		? `${proxyUrl.endsWith("/") ? proxyUrl.slice(0, -1) : proxyUrl}/${encodeURIComponent(url)}`
+		: url;
 
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), 15000);
+	if (signal) {
+		signal.addEventListener("abort", () => controller.abort(), { once: true });
+	}
 
 	try {
 		const response = await fetch(fetchUrl, {
@@ -80,13 +90,13 @@ export function createWebSearchToolDefinition(): ToolDefinition<typeof webSearch
 		async execute(
 			_toolCallId: string,
 			params: WebSearchInput,
-			_signal: AbortSignal | undefined,
+			signal: AbortSignal | undefined,
 			_onUpdate: unknown,
 			_ctx: ExtensionContext,
 		): Promise<AgentToolResult<unknown>> {
-			const maxResults = params.maxResults ?? 10;
+			const maxResults = Math.min(Math.max(params.maxResults ?? 10, 1), 50);
 			try {
-				const results = await searchDuckDuckGo(params.query, maxResults);
+				const results = await searchDuckDuckGo(params.query, maxResults, signal);
 				if (results.length === 0) {
 					return {
 						content: [{ type: "text", text: "No results found." }],
