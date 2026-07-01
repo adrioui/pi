@@ -3,4 +3,4 @@
  */
 
 export { InteractiveMode, type InteractiveModeOptions } from "./interactive/interactive-mode.ts";
-export { type PrintModeOptions, runPrintMode } from "./print-mode.ts";
+export { exportAtif, type PrintModeOptions, runPrintMode } from "./print-mode.ts";

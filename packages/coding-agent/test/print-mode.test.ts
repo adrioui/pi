@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionShutdownEvent } from "../src/index.ts";
@@ -11,7 +14,7 @@ type FakeExtensionRunner = {
 };
 
 type FakeSession = {
-	sessionManager: { getHeader: () => object | undefined };
+	sessionManager: { getHeader: () => object | undefined; getEntries: () => unknown[] };
 	agent: { waitForIdle: () => Promise<void> };
 	state: { messages: AssistantMessage[] };
 	extensionRunner: FakeExtensionRunner;
@@ -64,7 +67,7 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 	const state = { messages: [assistantMessage] };
 
 	const session: FakeSession = {
-		sessionManager: { getHeader: () => undefined },
+		sessionManager: { getHeader: () => undefined, getEntries: () => [] },
 		agent: { waitForIdle: async () => {} },
 		state,
 		extensionRunner,
@@ -121,6 +124,32 @@ describe("runPrintMode", () => {
 		expect(session.prompt).toHaveBeenCalledWith("hello");
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+	});
+
+	it("writes ATIF trajectory when requested", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-atif-test-"));
+		const atifPath = join(tempDir, "trajectory.json");
+
+		try {
+			const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+				mode: "text",
+				atifPath,
+			});
+
+			expect(exitCode).toBe(0);
+			expect(existsSync(atifPath)).toBe(true);
+			const exported = JSON.parse(readFileSync(atifPath, "utf-8")) as {
+				format?: string;
+				version?: number;
+				entries?: unknown[];
+			};
+			expect(exported.format).toBe("atif");
+			expect(exported.version).toBe(1);
+			expect(exported.entries).toEqual([]);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("emits session_shutdown and returns non-zero on assistant error", async () => {

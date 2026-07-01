@@ -141,6 +141,11 @@ describe("parseArgs", () => {
 			expect(result.export).toBe("session.jsonl");
 		});
 
+		test("parses --atif", () => {
+			const result = parseArgs(["--atif", "trajectory.json"]);
+			expect(result.atif).toBe("trajectory.json");
+		});
+
 		test("parses --thinking", () => {
 			const result = parseArgs(["--thinking", "high"]);
 			expect(result.thinking).toBe("high");

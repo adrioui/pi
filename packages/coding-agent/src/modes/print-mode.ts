@@ -6,9 +6,12 @@
  * - `pi --mode json "prompt"` - JSON event stream
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
+import type { ReadonlySessionManager, SessionEntry, SessionHeader } from "../core/session-manager.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
 
 /**
@@ -23,6 +26,28 @@ export interface PrintModeOptions {
 	initialMessage?: string;
 	/** Images to attach to the initial message */
 	initialImages?: ImageContent[];
+	/** Optional ATIF trajectory export path for the completed run */
+	atifPath?: string;
+}
+
+interface AtifTrajectory {
+	format: "atif";
+	version: 1;
+	session: SessionHeader | null;
+	entries: SessionEntry[];
+}
+
+export function exportAtif(sessionManager: ReadonlySessionManager, outputPath: string): string {
+	const resolvedPath = resolve(outputPath);
+	mkdirSync(dirname(resolvedPath), { recursive: true });
+	const trajectory: AtifTrajectory = {
+		format: "atif",
+		version: 1,
+		session: sessionManager.getHeader(),
+		entries: sessionManager.getEntries(),
+	};
+	writeFileSync(resolvedPath, `${JSON.stringify(trajectory, null, 2)}\n`, "utf-8");
+	return resolvedPath;
 }
 
 /**
@@ -30,7 +55,7 @@ export interface PrintModeOptions {
  * Sends prompts to the agent and outputs the result.
  */
 export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: PrintModeOptions): Promise<number> {
-	const { mode, messages = [], initialMessage, initialImages } = options;
+	const { mode, messages = [], initialMessage, initialImages, atifPath } = options;
 	let exitCode = 0;
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
@@ -143,6 +168,10 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 					}
 				}
 			}
+		}
+
+		if (atifPath) {
+			exportAtif(session.sessionManager, atifPath);
 		}
 
 		return exitCode;

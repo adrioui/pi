@@ -44,7 +44,7 @@ import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
-import { InteractiveMode, runPrintMode } from "./modes/index.ts";
+import { exportAtif, InteractiveMode, runPrintMode } from "./modes/index.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { handleSessionsCommand } from "./sessions-cli.ts";
@@ -831,6 +831,9 @@ export async function main(args: string[], options?: MainOptions) {
 
 		printTimings();
 		await interactiveMode.run();
+		if (parsed.atif) {
+			exportAtif(session.sessionManager, parsed.atif);
+		}
 	} else {
 		printTimings();
 		const exitCode = await runPrintMode(runtime, {
@@ -838,6 +841,7 @@ export async function main(args: string[], options?: MainOptions) {
 			messages: parsed.messages,
 			initialMessage,
 			initialImages,
+			atifPath: parsed.atif,
 		});
 		stopThemeWatcher();
 		restoreStdout();
