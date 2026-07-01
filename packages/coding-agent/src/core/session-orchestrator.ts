@@ -9,7 +9,6 @@ import {
 	type Model,
 	registerSessionResourceCleanup,
 	StreamingFieldParser,
-	type StreamingSchemaField,
 	typeboxToStreamingSchema,
 } from "@earendil-works/pi-ai";
 import type { AssistantMessage } from "@earendil-works/pi-ai/compat";
@@ -21,6 +20,7 @@ import {
 	createTaskGraphProjection,
 	DefaultEventSink,
 	type EventEnvelope,
+	ForkedProjectionStore,
 	JsonlEventStore,
 	type ProjectionDefinition,
 	type RoleDefinition,
@@ -31,7 +31,9 @@ import type { AgentSessionServices } from "./agent-session-services.ts";
 import { resolvePreferredAuxModel, runAuxModelText } from "./aux-model.ts";
 import { ForkRuntime } from "./fork-runtime.ts";
 import { verifyGoal } from "./goal-verifier.ts";
+import { COORDINATOR_ON_IDLE, COORDINATOR_ON_SPAWN } from "./role-prompts/lifecycle-hooks.ts";
 import { JUSTIFICATION_TEMPLATES, JUSTIFICATION_VALUES } from "./role-prompts/observer.ts";
+import { WORKER_BASE_PROMPT } from "./role-prompts/worker-base.ts";
 import { createCheckpointId, createSnapshot, isGitRepo } from "./snapshot.ts";
 import { TasteProfileStore, type TasteSignalType } from "./taste.ts";
 import { type OverthinkingInfo, ThinkingGovernor } from "./thinking-governor.ts";
@@ -158,9 +160,23 @@ function textFromContent(content: unknown): string {
 function textFromMessage(message: AgentMessage): string {
 	switch (message.role) {
 		case "user":
-		case "assistant":
-		case "toolResult":
 			return textFromContent(message.content);
+		case "assistant": {
+			if (!Array.isArray(message.content)) return "";
+			const parts: string[] = [];
+			for (const part of message.content) {
+				if (typeof part !== "object" || part === null || !("type" in part)) continue;
+				if (part.type === "text" && "text" in part) {
+					parts.push(String(part.text));
+				} else if (part.type === "toolCall" && "name" in part) {
+					const args = "arguments" in part ? JSON.stringify(part.arguments).slice(0, 500) : "";
+					parts.push(`[called tool: ${String(part.name)}(${args})]`);
+				}
+			}
+			return parts.join("\n").trim();
+		}
+		case "toolResult":
+			return `[tool result: ${message.toolName}] ${textFromContent(message.content)}`.trim();
 		case "custom":
 			return textFromContent(message.content);
 		case "bashExecution":
@@ -423,6 +439,7 @@ export class SessionOrchestrator {
 	private readonly existingEvents: RuntimeEvent[];
 	private readonly forkRuntime: ForkRuntime;
 	private readonly thinkingGovernor: ThinkingGovernor;
+	private readonly forkedProjectionStore: ForkedProjectionStore<RuntimeEvent>;
 	private sequence: number;
 	private turnOutcomeCount: number;
 	private lastEventId?: string;
@@ -430,8 +447,6 @@ export class SessionOrchestrator {
 	private eventQueue: Promise<void> = Promise.resolve();
 	private previousGitStatus: string | undefined;
 	private readonly streamingParsers = new Map<string, StreamingFieldParser>();
-	private readonly toolSchemaRegistry = new Map<string, StreamingSchemaField>();
-	private _pendingCorrectiveFeedback: string | undefined;
 	private workerExecutor: WorkerExecutor | undefined;
 
 	constructor(session: AgentSession, services: AgentSessionServices) {
@@ -448,21 +463,26 @@ export class SessionOrchestrator {
 		this.sequence = existingMeta?.lastSequence ?? 0;
 		this.turnOutcomeCount = this.existingEvents.filter((event) => event.type === "turn_outcome").length;
 		this.lastEventId = existingMeta?.lastEventId;
+		this.forkedProjectionStore = new ForkedProjectionStore<RuntimeEvent>();
 		this.sink = new DefaultEventSink<RuntimeEvent>(store, {
+			projectionStore: this.forkedProjectionStore,
 			onEventApplied: (event) => {
 				this.sequence = Math.max(this.sequence, event.sequence);
 				this.lastEventId = event.id;
 				this.writeSidecars();
 			},
 		});
-		this.sink.registerProjection(createOverviewProjection(session));
-		this.sink.registerProjection(createTranscriptProjection());
+		this.forkedProjectionStore.registerGlobal(createOverviewProjection(session));
+		this.forkedProjectionStore.registerGlobal(createTranscriptProjection());
 		for (const projection of createBuiltinExtendedProjections<RuntimeEvent>()) {
-			this.sink.registerProjection(projection);
+			this.forkedProjectionStore.registerGlobal(projection);
 		}
-		this.sink.registerProjection(createGoalProjection<RuntimeEvent>());
-		this.sink.registerProjection(createTaskGraphProjection<RuntimeEvent>());
-		this.sink.registerProjection(createCheckpointProjection<RuntimeEvent>());
+		this.forkedProjectionStore.registerGlobal(createGoalProjection<RuntimeEvent>());
+		this.forkedProjectionStore.registerGlobal(createTaskGraphProjection<RuntimeEvent>());
+		this.forkedProjectionStore.registerGlobal(createCheckpointProjection<RuntimeEvent>());
+		this.forkedProjectionStore.registerForked(createGoalProjection<RuntimeEvent>());
+		this.forkedProjectionStore.registerForked(createTaskGraphProjection<RuntimeEvent>());
+		this.forkedProjectionStore.registerForked(createCheckpointProjection<RuntimeEvent>());
 		if (this.existingEvents.length > 0) {
 			this.sink.replay(this.existingEvents);
 			const lastEvent = this.existingEvents[this.existingEvents.length - 1];
@@ -518,41 +538,67 @@ export class SessionOrchestrator {
 				},
 				getSystemPrompt: (role: string) => {
 					const prompts: Record<string, string> = {
-						scout: "You are a scout agent. Investigate and report findings.",
-						architect: "You are an architect agent. Design solutions and report plans.",
-						engineer: "You are an engineer agent. Implement changes and report results.",
-						critic: "You are a critic agent. Review work and report issues.",
-						scientist: "You are a scientist agent. Diagnose problems and report findings.",
-						artisan: "You are an artisan agent. Create content and report results.",
+						scout: "Investigate the assigned area and report concrete findings.",
+						architect: "Design a solution and report the plan, tradeoffs, and risks.",
+						engineer: "Implement the assigned change and report files changed plus verification.",
+						critic: "Review the assigned work and report correctness or quality issues.",
+						scientist: "Diagnose the assigned problem and report evidence-backed findings.",
+						artisan: "Create the assigned content or artifact and report completion details.",
 					};
-					return prompts[role] ?? "You are a worker agent. Complete the assigned task.";
+					return `${WORKER_BASE_PROMPT}\n\n## Your role\n${prompts[role] ?? "Complete the assigned task."}`;
 				},
-				getAllTools: () => [],
+				getAllTools: () => this.session.getExecutableWorkerTools(),
 				getProjectContext: () => collectFolderStructure(this.session.sessionManager.getCwd()),
+				getTranscript: () =>
+					this.session.agent.state.messages
+						.slice(-10)
+						.map((message) => `${message.role}: ${textFromMessage(message)}`)
+						.filter((line) => line.trim().length > 0)
+						.join("\n\n"),
+				publishEvent: (type, payload) => this.publishRuntimeEvent(type, payload),
+				userRules: this.session.getUserPermissionRules(),
+				forkedProjectionStore: this.forkedProjectionStore,
 				onWorkerFinished: (result) => {
 					void this.publishRuntimeEvent("worker_finished", {
 						agentId: result.agentId,
 						forkId: result.forkId,
 						role: result.role,
 						result: result.text,
-					}).catch(() => {});
+					})
+						.catch(() => {})
+						.finally(() => this.forkedProjectionStore.removeFork(result.forkId));
 					void this.session
 						.sendCustomMessage(
 							{
-								customType: "advisor-message",
+								customType: "worker-result",
 								content: `<worker_result role="${result.role}">\n${result.text}\n</worker_result>`,
-								display: false,
+								display: true,
 							},
 							undefined,
 						)
 						.catch(() => {});
+					const guidance = COORDINATOR_ON_IDLE[result.role];
+					if (guidance) {
+						void this.session
+							.sendCustomMessage(
+								{
+									customType: "coordinator-guidance",
+									content: guidance,
+									display: false,
+								},
+								undefined,
+							)
+							.catch(() => {});
+					}
 				},
 				onWorkerError: (error) => {
 					void this.publishRuntimeEvent("worker_error", {
 						agentId: error.agentId,
 						forkId: error.forkId,
 						error: error.error,
-					}).catch(() => {});
+					})
+						.catch(() => {})
+						.finally(() => this.forkedProjectionStore.removeFork(error.forkId));
 				},
 			});
 			this.sink.registerRole(this.workerExecutor.asRole());
@@ -593,19 +639,6 @@ export class SessionOrchestrator {
 				skills: [],
 				scratchpadPath: join(cwd, ".pi", "scratchpad"),
 			});
-		}
-
-		// Register tool schemas for mid-stream validation (Phase 2 constrained decoding).
-		// The orchestrator runs a parallel StreamingFieldParser per tool call, fed by
-		// toolcall_delta events, and validates against these schemas.
-		for (const tool of this.session.agent.state.tools) {
-			try {
-				const schema = typeboxToStreamingSchema(tool.parameters);
-				this.registerToolSchema(tool.name, schema);
-			} catch {
-				// Schema conversion can fail for complex/edge-case tool definitions;
-				// mid-stream validation simply won't run for that tool (safety net only).
-			}
 		}
 
 		// Phase 6: Initialize autopilot state from env var
@@ -855,9 +888,95 @@ export class SessionOrchestrator {
 			},
 		};
 
+		const coordinatorSpawnRole: RoleDefinition<RuntimeEvent> = {
+			name: "coordinator-spawn",
+			match: (event) => event.type === "agent_created" && event.payload.mode === "spawn",
+			concurrencyKey: () => "coordinator-spawn",
+			run: async ({ event }) => {
+				const role = String(event.payload.role ?? "");
+				const guidance = COORDINATOR_ON_SPAWN[role];
+				if (!guidance) return;
+				await this.session.sendCustomMessage(
+					{
+						customType: "coordinator-guidance",
+						content: guidance,
+						display: false,
+					},
+					undefined,
+				);
+			},
+		};
+
+		const turnPassRole: RoleDefinition<RuntimeEvent> = {
+			name: "turn-pass",
+			match: (event) => event.type === "turn_passed",
+			concurrencyKey: () => "turn-pass",
+			run: async ({ event }) => {
+				const message = String(event.payload.message ?? "pass");
+				await this.session.sendCustomMessage(
+					{
+						customType: "turn-passed",
+						content: `[Turn passed: ${message}]`,
+						display: false,
+					},
+					undefined,
+				);
+			},
+		};
+
+		const taskDispatcherRole: RoleDefinition<RuntimeEvent> = {
+			name: "task-dispatcher",
+			match: (event) =>
+				event.type === "task.assigned" ||
+				(event.type === "task.created" && typeof event.payload.assignee === "string"),
+			concurrencyKey: (event) => String(event.payload.assignee ?? event.payload.taskId ?? event.id),
+			run: async ({ event }) => {
+				const assignee = String(event.payload.assignee ?? "");
+				if (!assignee) return;
+				const title = String(event.payload.title ?? event.payload.taskId ?? "");
+				const description = String(event.payload.description ?? "");
+				const message = description ? `Task assigned: ${title}\n\n${description}` : `Task assigned: ${title}`;
+				await this.forkRuntime.messageWorker({
+					workerId: assignee,
+					message,
+				});
+			},
+		};
+
+		const goalCompletionRole: RoleDefinition<RuntimeEvent> = {
+			name: "goal-completion-verifier",
+			match: (event) => event.type === "goal.completion_requested",
+			concurrencyKey: () => "goal-completion-verifier",
+			run: async ({ event, projections }) => {
+				const goal = projections.get<{ goal: string | null }>("Goal");
+				const transcript = projections.get<TranscriptProjection>("transcript");
+				const goalText = String(event.payload.goalText ?? goal?.goal ?? "");
+				if (!goalText || !transcript) return;
+				const verdict = await verifyGoal(
+					{
+						goalText,
+						transcript: transcript.recent,
+						toolResults: [],
+						fileChanges: [],
+						agentClaim: "incomplete",
+					},
+					this.services,
+					this.session.model,
+				);
+				await this.publishRuntimeEvent(verdict.verdict === "finished" ? "goal.finished" : "goal.incomplete", {
+					evidence: String(event.payload.evidence ?? verdict.evidence),
+					source: verdict.source,
+				});
+			},
+		};
+
 		this.sink.registerRole(checkpointRole);
 		this.sink.registerRole(observerRole);
 		this.sink.registerRole(advisorRole);
+		this.sink.registerRole(coordinatorSpawnRole);
+		this.sink.registerRole(turnPassRole);
+		this.sink.registerRole(taskDispatcherRole);
+		this.sink.registerRole(goalCompletionRole);
 	}
 
 	private async handleSessionEvent(event: AgentSessionEvent): Promise<void> {
@@ -884,29 +1003,20 @@ export class SessionOrchestrator {
 				if (update.type === "toolcall_delta" && update.delta) {
 					this.onToolCallDelta(event);
 				}
+				if (update.type === "toolcall_end") {
+					const ended = event.assistantMessageEvent as { toolCall?: { id?: string } };
+					if (ended.toolCall?.id) {
+						this.streamingParsers.delete(ended.toolCall.id);
+					}
+				}
 			}
-			if (event.type === "agent_end" && !event.willRetry) {
-				this.thinkingGovernor.reset("leader");
+			if (event.type === "agent_end") {
+				this.streamingParsers.clear();
+				if (!event.willRetry) {
+					this.thinkingGovernor.reset("leader");
+				}
 			}
 		});
-	}
-
-	/**
-	 * Register a tool schema for mid-stream validation.
-	 * Called at session start for each tool definition.
-	 */
-	registerToolSchema(toolName: string, schema: StreamingSchemaField): void {
-		this.toolSchemaRegistry.set(toolName, schema);
-	}
-
-	/**
-	 * Get and clear pending corrective feedback.
-	 * Called by AgentSession after _prepareRetry returns true.
-	 */
-	getAndClearCorrectiveFeedback(): string | undefined {
-		const feedback = this._pendingCorrectiveFeedback;
-		this._pendingCorrectiveFeedback = undefined;
-		return feedback;
 	}
 
 	/**
@@ -925,7 +1035,14 @@ export class SessionOrchestrator {
 
 		let parser = this.streamingParsers.get(toolCallId);
 		if (!parser) {
-			const schema = this.toolSchemaRegistry.get(toolName);
+			const tool = this.session.agent.state.tools.find((entry) => entry.name === toolName);
+			if (!tool) return;
+			let schema: ReturnType<typeof typeboxToStreamingSchema>;
+			try {
+				schema = typeboxToStreamingSchema(tool.parameters);
+			} catch {
+				return;
+			}
 			parser = new StreamingFieldParser(schema);
 			this.streamingParsers.set(toolCallId, parser);
 		}
@@ -935,14 +1052,13 @@ export class SessionOrchestrator {
 
 		if (!parser.valid) {
 			const feedback = formatCorrectiveFeedback(parser.getValidationState());
-			this._pendingCorrectiveFeedback = feedback;
 			this.session.abortCurrentStream("tool_validation", feedback);
 			void this.publishRuntimeEvent("session.tool_validation_failed", {
 				toolName,
 				toolCallId,
 				errors: [parser.validationIssue ?? "Unknown validation error"],
 			}).catch(() => {});
-			this.streamingParsers.delete(toolCallId);
+			this.streamingParsers.clear();
 		}
 	}
 
@@ -1003,8 +1119,8 @@ export class SessionOrchestrator {
 						source: verdict.source,
 					},
 				);
-			} catch {
-				// Goal verification failure is non-fatal
+			} catch (err) {
+				console.error("[orchestrator] Goal verification failed:", err instanceof Error ? err.message : err);
 			}
 		}
 
@@ -1262,6 +1378,9 @@ export class SessionOrchestrator {
 				});
 				break;
 			default:
+				if (process.env.PI_DEBUG === "1") {
+					console.debug(`[orchestrator] Unhandled session event: ${event.type}`);
+				}
 				break;
 		}
 

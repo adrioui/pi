@@ -22,6 +22,7 @@ describe("WorkerSession", () => {
 		};
 
 		let finished = false;
+		let errored = false;
 		const session = new WorkerSession({
 			forkId: "fork1",
 			agentId: "agent1",
@@ -35,13 +36,15 @@ describe("WorkerSession", () => {
 			onFinished: () => {
 				finished = true;
 			},
-			onError: () => {},
+			onError: () => {
+				errored = true;
+			},
 		});
 
 		await session.start();
 		// Without a real LLM, the session will error out or reach max turns
 		// The important thing is it doesn't crash and calls onFinished or onError
-		expect(finished || true).toBe(true);
+		expect(finished || errored).toBe(true);
 	});
 
 	it("delivers messages to the queue", () => {
@@ -79,10 +82,30 @@ describe("WorkerSession", () => {
 
 describe("filterToolsForRole", () => {
 	const allTools: WorkerTool[] = [
-		{ name: "read", parameters: Type.Object({}), execute: async () => "" },
-		{ name: "bash", parameters: Type.Object({}), execute: async () => "" },
-		{ name: "spawnWorker", parameters: Type.Object({}), execute: async () => "" },
-		{ name: "killWorker", parameters: Type.Object({}), execute: async () => "" },
+		{
+			name: "read",
+			description: "Read files",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "" }], details: null }),
+		},
+		{
+			name: "bash",
+			description: "Run shell commands",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "" }], details: null }),
+		},
+		{
+			name: "spawnWorker",
+			description: "Spawn a worker",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "" }], details: null }),
+		},
+		{
+			name: "killWorker",
+			description: "Kill a worker",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "" }], details: null }),
+		},
 	];
 
 	it("filters out leader-only tools for workers", () => {

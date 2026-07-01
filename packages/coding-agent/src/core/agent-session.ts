@@ -129,6 +129,7 @@ import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/t
 import { createUpdateTaskToolDefinition } from "./tools/update-task.ts";
 import { createWebFetchToolDefinition } from "./tools/web-fetch.ts";
 import { createWebSearchToolDefinition } from "./tools/web-search.ts";
+import type { WorkerTool } from "./worker-session.ts";
 
 // ============================================================================
 // Skill Block Parsing
@@ -1090,6 +1091,31 @@ export class AgentSession {
 		}));
 	}
 
+	getExecutableWorkerTools(): WorkerTool[] {
+		return Array.from(this._toolRegistry.values()).map((tool) => ({
+			name: tool.name,
+			description: tool.description,
+			parameters: tool.parameters,
+			execute: (id, args, signal, onUpdate) => {
+				const input = args as Record<string, unknown>;
+				const mutatingTools = new Set(["edit", "write", "bash", "edit-diff", "restore_snapshot"]);
+				if (mutatingTools.has(tool.name)) {
+					const guardedPathResult = checkInputForGuardedPaths(input);
+					if (guardedPathResult) {
+						throw new Error(
+							`[Permission Gate] Worker tool \`${tool.name}\` blocked on guarded path \`${guardedPathResult.path}\`.`,
+						);
+					}
+				}
+				return tool.execute(id, args, signal, onUpdate);
+			},
+		}));
+	}
+
+	getUserPermissionRules(): PermissionRule[] {
+		return [...this._permissionRules];
+	}
+
 	getToolDefinition(name: string): ToolDefinition | undefined {
 		return this._toolDefinitions.get(name)?.definition;
 	}
@@ -1337,7 +1363,7 @@ export class AgentSession {
 			this._continueTracker.reset();
 			await this.agent.prompt(messages);
 			while (await this._handlePostAgentRun()) {
-				if (this._continueTracker.shouldSkip(this.agent.state.messages)) {
+				if (this._retryAttempt === 0 && this._continueTracker.shouldSkip(this.agent.state.messages)) {
 					break;
 				}
 				await this.agent.continue();
@@ -2971,6 +2997,7 @@ export class AgentSession {
 				["messageAdvisor", createMessageAdvisorToolDefinition()],
 			] as const;
 			for (const [toolName, toolDef] of roleTools) {
+				if (!isAllowedTool(toolName)) continue;
 				this._toolDefinitions.set(toolName, {
 					definition: toolDef,
 					sourceInfo: createSyntheticSourceInfo(`<builtin:${toolName}>`, {

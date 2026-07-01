@@ -53,6 +53,7 @@ const TOOL_HANDLERS: Record<string, RoleToolHandler> = {
 	createTask: async (rt, p) => {
 		const result = await rt.createTask({
 			title: String(p.title ?? p.message ?? ""),
+			description: p.description as string | undefined,
 			parentId: p.parentId as string | undefined,
 			assignee: p.assignee as string | undefined,
 		});
@@ -67,7 +68,7 @@ const TOOL_HANDLERS: Record<string, RoleToolHandler> = {
 	},
 	finishGoal: async (rt, p) => {
 		await rt.finishGoal({ goalText: p.goalText as string | undefined, evidence: p.evidence as string | undefined });
-		return success("Goal marked as finished");
+		return success("Goal completion requested. Verification in progress — you will be notified of the result.");
 	},
 	pass: async (rt, p) => {
 		await rt.pass({ message: p.message as string | undefined });
@@ -89,7 +90,17 @@ const TOOL_HANDLERS: Record<string, RoleToolHandler> = {
 
 const TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
 	spawnWorker: Type.Object({
-		role: Type.String({ description: "Role to spawn (scout, architect, engineer, critic, scientist, artisan)" }),
+		role: Type.Union(
+			[
+				Type.Literal("scout"),
+				Type.Literal("architect"),
+				Type.Literal("engineer"),
+				Type.Literal("critic"),
+				Type.Literal("scientist"),
+				Type.Literal("artisan"),
+			],
+			{ description: "Role to spawn" },
+		),
 		message: Type.Optional(Type.String({ description: "Initial message/task for the worker" })),
 		taskId: Type.Optional(Type.String({ description: "Task ID to assign to the worker" })),
 		context: Type.Optional(Type.String({ description: "Additional context for the worker" })),
@@ -104,6 +115,7 @@ const TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
 	}),
 	createTask: Type.Object({
 		title: Type.String({ description: "Task title" }),
+		description: Type.Optional(Type.String({ description: "Task description or context" })),
 		parentId: Type.Optional(Type.String({ description: "Parent task ID for subtasks" })),
 		assignee: Type.Optional(Type.String({ description: "Worker ID to assign the task to" })),
 	}),
@@ -167,7 +179,7 @@ export function createRoleControlTool(name: string, description: string): ToolDe
 				const runtime = getRuntime(ctx);
 				if (!runtime) {
 					return errorResult(
-						"Multi-agent mode is disabled. Set PI_ENABLE_MULTI_AGENT to a non-zero value to enable role-control tools.",
+						"Multi-agent mode is disabled (PI_ENABLE_MULTI_AGENT=0 is set). Unset this environment variable to enable role-control tools.",
 					);
 				}
 				return await handler(runtime, params as Record<string, unknown>);

@@ -45,6 +45,7 @@ export interface KillWorkerInput {
 
 export interface CreateTaskInput {
 	title: string;
+	description?: string;
 	parentId?: string;
 	assignee?: string;
 }
@@ -88,6 +89,7 @@ export class ForkRuntime {
 	private readonly publish: PublishFn;
 	private readonly getSequence: () => number;
 	private readonly resolveModel?: (role: string) => { provider: string; id: string } | undefined;
+	private readonly workerForkIds = new Map<string, string>();
 
 	constructor(options: ForkRuntimeOptions) {
 		this.sessionId = options.sessionId;
@@ -119,6 +121,7 @@ export class ForkRuntime {
 			message: input.message,
 			model: model ? { provider: model.provider, id: model.id } : undefined,
 		});
+		this.workerForkIds.set(agentId, forkId);
 		return { forkId, agentId };
 	}
 
@@ -128,6 +131,7 @@ export class ForkRuntime {
 	async messageWorker(input: MessageWorkerInput): Promise<void> {
 		await this.publish("worker_messaged", {
 			workerId: input.workerId,
+			forkId: this.workerForkIds.get(input.workerId),
 			message: input.message,
 			sessionId: this.sessionId,
 		});
@@ -137,13 +141,16 @@ export class ForkRuntime {
 	 * Kill a worker. Publishes an `agent_finished` event with killed status.
 	 */
 	async killWorker(input: KillWorkerInput): Promise<void> {
+		const forkId = this.workerForkIds.get(input.workerId) ?? input.workerId;
 		await this.publish("agent_finished", {
 			agentId: input.workerId,
-			forkId: input.workerId,
+			forkId,
 			willRetry: false,
 			killed: true,
+			stopReason: "killed",
 			reason: input.reason ?? "killed by leader",
 		});
+		this.workerForkIds.delete(input.workerId);
 	}
 
 	/**
@@ -154,6 +161,7 @@ export class ForkRuntime {
 		await this.publish("task.created", {
 			taskId,
 			title: input.title,
+			description: input.description ?? "",
 			parentId: input.parentId ?? null,
 			assignee: input.assignee ?? null,
 		});
@@ -171,12 +179,13 @@ export class ForkRuntime {
 	}
 
 	/**
-	 * Mark the current goal as finished. Publishes a `goal.finished` event.
+	 * Request current goal completion. The orchestrator verifies before publishing `goal.finished`.
 	 */
 	async finishGoal(input: FinishGoalInput): Promise<void> {
-		await this.publish("goal.finished", {
+		await this.publish("goal.completion_requested", {
 			goalText: input.goalText,
 			evidence: input.evidence,
+			sessionId: this.sessionId,
 		});
 	}
 

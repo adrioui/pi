@@ -11,8 +11,9 @@
  */
 
 import type { Model } from "@earendil-works/pi-ai";
-import type { EventEnvelope, RoleDefinition } from "@earendil-works/pi-event-core";
+import type { EventEnvelope, ForkedProjectionStore, RoleDefinition } from "@earendil-works/pi-event-core";
 import { DetachedProcessRegistry } from "./detached-process-registry.ts";
+import type { PermissionRule } from "./permissions/permission-gate.ts";
 import { buildWorkerContext } from "./worker-context-builder.ts";
 import { WorkerSession, type WorkerTool } from "./worker-session.ts";
 import { filterToolsForRole } from "./worker-tools.ts";
@@ -24,6 +25,10 @@ export interface WorkerExecutorOptions {
 	getSystemPrompt: (role: string) => string;
 	getAllTools: () => WorkerTool[];
 	getProjectContext: () => string;
+	getTranscript: () => string;
+	publishEvent: (type: string, payload: Record<string, unknown>) => Promise<void>;
+	userRules?: PermissionRule[];
+	forkedProjectionStore?: ForkedProjectionStore<RuntimeEvent>;
 	onWorkerFinished: (result: { text: string; forkId: string; agentId: string; role: string }) => void;
 	onWorkerError: (error: { error: string; forkId: string; agentId: string }) => void;
 }
@@ -31,6 +36,8 @@ export interface WorkerExecutorOptions {
 export class WorkerExecutor {
 	private readonly workers = new Map<string, WorkerSession>();
 	private readonly forkWorkers = new Map<string, Set<string>>();
+	private readonly pendingMessages = new Map<string, string[]>();
+	private readonly intentionallyKilled = new Set<string>();
 	private readonly detachedRegistry = new DetachedProcessRegistry();
 	private readonly options: WorkerExecutorOptions;
 
@@ -45,7 +52,10 @@ export class WorkerExecutor {
 				event.type === "agent_created" ||
 				event.type === "worker_messaged" ||
 				(event.type === "agent_finished" && Boolean(event.payload.killed)),
-			concurrencyKey: (event) => String(event.payload.forkId ?? event.payload.workerId ?? event.id),
+			concurrencyKey: (event) =>
+				event.type === "worker_messaged"
+					? String(event.payload.workerId ?? event.id)
+					: String(event.payload.forkId ?? event.payload.agentId ?? event.id),
 			run: async (ctx) => {
 				if (ctx.event.type === "agent_created") {
 					await this.onAgentCreated(ctx.event);
@@ -65,24 +75,41 @@ export class WorkerExecutor {
 			role: string;
 			context?: string;
 			message?: string;
+			mode?: string;
 		};
 
 		const { forkId, agentId, role } = payload;
+		if (payload.mode !== "spawn" || role === "leader") return;
+
 		const model = this.options.resolveModel(role);
 		if (!model) {
+			await this.publishTerminalSpawnFailure(forkId, agentId, role, "no_model");
 			this.options.onWorkerError({ error: `No model resolved for role: ${role}`, forkId, agentId });
 			return;
 		}
 
-		const systemPrompt = this.options.getSystemPrompt(role);
-		const allTools = this.options.getAllTools();
-		const filteredTools = filterToolsForRole(role, allTools);
-		const projectContext = this.options.getProjectContext();
-		const context = buildWorkerContext({
-			sessionStart: payload.message ?? payload.context ?? "",
-			projectContext,
-			transcript: "",
-		});
+		let systemPrompt: string;
+		let filteredTools: WorkerTool[];
+		let context: string;
+		try {
+			systemPrompt = this.options.getSystemPrompt(role);
+			const allTools = this.options.getAllTools();
+			filteredTools = filterToolsForRole(role, allTools);
+			const projectContext = this.options.getProjectContext();
+			context = buildWorkerContext({
+				sessionStart: payload.message ?? payload.context ?? "",
+				projectContext,
+				transcript: this.options.getTranscript(),
+			});
+		} catch (err) {
+			await this.publishTerminalSpawnFailure(forkId, agentId, role, "spawn_setup_error");
+			this.options.onWorkerError({
+				error: `Worker setup failed: ${err instanceof Error ? err.message : String(err)}`,
+				forkId,
+				agentId,
+			});
+			return;
+		}
 
 		const session = new WorkerSession({
 			forkId,
@@ -93,12 +120,21 @@ export class WorkerExecutor {
 			initialMessage: payload.message ?? payload.context ?? "",
 			tools: filteredTools,
 			contextLimit: model.contextWindow ?? 128000,
+			userRules: this.options.userRules ?? [],
+			publishEvent: (type, eventPayload) =>
+				this.options.publishEvent(type, {
+					...eventPayload,
+					forkId,
+					agentId,
+					role,
+				}),
 			onFinished: (result) => {
 				this.cleanupWorker(forkId, agentId);
 				this.options.onWorkerFinished({ ...result, role });
 			},
 			onError: (error) => {
 				this.cleanupWorker(forkId, agentId);
+				if (this.intentionallyKilled.delete(agentId)) return;
 				this.options.onWorkerError(error);
 			},
 		});
@@ -110,9 +146,17 @@ export class WorkerExecutor {
 			this.forkWorkers.set(forkId, forkSet);
 		}
 		forkSet.add(agentId);
+		const pending = this.pendingMessages.get(agentId);
+		if (pending) {
+			for (const message of pending) {
+				session.deliverMessage(message);
+			}
+			this.pendingMessages.delete(agentId);
+		}
 
 		void session.start().catch((err) => {
 			this.cleanupWorker(forkId, agentId);
+			if (this.intentionallyKilled.delete(agentId)) return;
 			this.options.onWorkerError({
 				error: `Worker session crashed: ${err instanceof Error ? err.message : String(err)}`,
 				forkId,
@@ -126,15 +170,21 @@ export class WorkerExecutor {
 		const session = this.workers.get(payload.workerId);
 		if (session) {
 			session.deliverMessage(payload.message);
+			return;
 		}
+		const queue = this.pendingMessages.get(payload.workerId) ?? [];
+		queue.push(payload.message);
+		this.pendingMessages.set(payload.workerId, queue);
 	}
 
 	private async onWorkerKilled(event: RuntimeEvent): Promise<void> {
 		const payload = event.payload as { agentId: string; forkId: string };
 		const session = this.workers.get(payload.agentId);
-		if (session) {
-			session.kill();
+		if (!session) {
+			return;
 		}
+		this.intentionallyKilled.add(payload.agentId);
+		session.kill();
 		this.detachedRegistry.killAll(payload.forkId);
 		this.cleanupWorker(payload.forkId, payload.agentId);
 	}
@@ -142,6 +192,29 @@ export class WorkerExecutor {
 	private cleanupWorker(forkId: string, agentId: string): void {
 		this.workers.delete(agentId);
 		this.forkWorkers.get(forkId)?.delete(agentId);
+		this.options.forkedProjectionStore?.removeFork(forkId);
+	}
+
+	isWorkerRunning(agentId: string): boolean {
+		return this.workers.has(agentId);
+	}
+
+	private async publishTerminalSpawnFailure(
+		forkId: string,
+		agentId: string,
+		role: string,
+		reason: string,
+	): Promise<void> {
+		await this.options.publishEvent("agent_finished", {
+			agentId,
+			forkId,
+			role,
+			killed: true,
+			stopReason: "error",
+			reason,
+			willRetry: false,
+		});
+		this.pendingMessages.delete(agentId);
 	}
 
 	dispose(): void {
@@ -149,6 +222,8 @@ export class WorkerExecutor {
 			session.kill();
 		}
 		this.workers.clear();
+		this.pendingMessages.clear();
+		this.intentionallyKilled.clear();
 		this.detachedRegistry.dispose();
 		this.forkWorkers.clear();
 	}
