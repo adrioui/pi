@@ -22,7 +22,6 @@ export const DEEPSEEK_MODELS = {
 		},
 		contextWindow: 1000000,
 		maxTokens: 384000,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"deepseek-v4-pro": {
 		id: "deepseek-v4-pro",
@@ -42,6 +41,5 @@ export const DEEPSEEK_MODELS = {
 		},
 		contextWindow: 1000000,
 		maxTokens: 384000,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 } as const;

@@ -22,7 +22,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 202752,
 		maxTokens: 131072,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"MiniMaxAI/MiniMax-M3": {
 		id: "MiniMaxAI/MiniMax-M3",
@@ -42,7 +41,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 524288,
 		maxTokens: 250000,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"Qwen/Qwen2.5-7B-Instruct-Turbo": {
 		id: "Qwen/Qwen2.5-7B-Instruct-Turbo",
@@ -61,7 +59,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 32768,
 		maxTokens: 32768,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"Qwen/Qwen3-235B-A22B-Instruct-2507-tput": {
 		id: "Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
@@ -80,7 +77,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 262144,
 		maxTokens: 262144,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"Qwen/Qwen3.5-397B-A17B": {
 		id: "Qwen/Qwen3.5-397B-A17B",
@@ -100,7 +96,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 262144,
 		maxTokens: 130000,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"Qwen/Qwen3.5-9B": {
 		id: "Qwen/Qwen3.5-9B",
@@ -120,7 +115,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 262144,
 		maxTokens: 65536,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"Qwen/Qwen3.6-Plus": {
 		id: "Qwen/Qwen3.6-Plus",
@@ -140,7 +134,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 1000000,
 		maxTokens: 500000,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"Qwen/Qwen3.7-Max": {
 		id: "Qwen/Qwen3.7-Max",
@@ -159,7 +152,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 1000000,
 		maxTokens: 500000,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"deepseek-ai/DeepSeek-V4-Pro": {
 		id: "deepseek-ai/DeepSeek-V4-Pro",
@@ -179,7 +171,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 512000,
 		maxTokens: 384000,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"essentialai/Rnj-1-Instruct": {
 		id: "essentialai/Rnj-1-Instruct",
@@ -198,7 +189,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 32768,
 		maxTokens: 32768,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"google/gemma-4-31B-it": {
 		id: "google/gemma-4-31B-it",
@@ -218,7 +208,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 262144,
 		maxTokens: 131072,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"meta-llama/Llama-3.3-70B-Instruct-Turbo": {
 		id: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
@@ -237,7 +226,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 131072,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"moonshotai/Kimi-K2.6": {
 		id: "moonshotai/Kimi-K2.6",
@@ -257,7 +245,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 262144,
 		maxTokens: 131000,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"moonshotai/Kimi-K2.7-Code": {
 		id: "moonshotai/Kimi-K2.7-Code",
@@ -277,7 +264,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 262144,
 		maxTokens: 131072,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"nvidia/nemotron-3-ultra-550b-a55b": {
 		id: "nvidia/nemotron-3-ultra-550b-a55b",
@@ -297,7 +283,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 512300,
 		maxTokens: 512300,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"openai/gpt-oss-120b": {
 		id: "openai/gpt-oss-120b",
@@ -317,7 +302,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 131072,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"openai/gpt-oss-20b": {
 		id: "openai/gpt-oss-20b",
@@ -337,7 +321,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 131072,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"zai-org/GLM-5": {
 		id: "zai-org/GLM-5",
@@ -357,7 +340,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 202752,
 		maxTokens: 131072,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"zai-org/GLM-5.1": {
 		id: "zai-org/GLM-5.1",
@@ -377,7 +359,6 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 202752,
 		maxTokens: 131072,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"zai-org/GLM-5.2": {
 		id: "zai-org/GLM-5.2",
@@ -397,6 +378,5 @@ export const TOGETHER_MODELS = {
 		},
 		contextWindow: 262144,
 		maxTokens: 164000,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 } as const;

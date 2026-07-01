@@ -8,7 +8,7 @@ import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR } from "../co
 import type { ExtensionFlag } from "../core/extensions/types.ts";
 import { AGENT_MODES, type AgentMode, isAgentMode } from "../core/modes.ts";
 
-export type Mode = "text" | "json" | "rpc";
+export type Mode = "text" | "json";
 
 export interface Args {
 	provider?: string;
@@ -79,7 +79,7 @@ export function parseArgs(args: string[]): Args {
 			result.version = true;
 		} else if (arg === "--mode" && i + 1 < args.length) {
 			const mode = args[++i];
-			if (mode === "text" || mode === "json" || mode === "rpc") {
+			if (mode === "text" || mode === "json") {
 				result.mode = mode;
 			}
 		} else if (arg === "--agent-mode" && i + 1 < args.length) {
@@ -246,9 +246,6 @@ ${chalk.bold("Commands:")}
   ${APP_NAME} config                    Open TUI to enable/disable package resources
   ${APP_NAME} sessions search [query]   Search saved sessions
   ${APP_NAME} sessions export <id|path> Export a saved session as Markdown or JSON
-  ${APP_NAME} serve [options]           Start local HTTP serve mode
-  ${APP_NAME} daemon [subcommand]       Start or control the local daemon
-  ${APP_NAME} headless [options]        Alias for --mode rpc
   ${APP_NAME} taste <subcommand> [source] Manage taste profiles and git-history learning
   ${APP_NAME} <command> --help          Show help for install/remove/uninstall/update/list
 
@@ -258,7 +255,7 @@ ${chalk.bold("Options:")}
   --api-key <key>                API key (defaults to env vars)
   --system-prompt <text>         System prompt (default: coding assistant prompt)
   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
-  --mode <mode>                  Output mode: text (default), json, or rpc
+  --mode <mode>                  Output mode: text (default) or json
   --agent-mode <mode>            Tool mode: default, read-only, plan, or build
   --print, -p                    Non-interactive mode: process prompt and exit
   --continue, -c                 Continue previous session
@@ -301,13 +298,6 @@ Extensions can register additional flags (e.g., --plan from plan-mode extension)
 ${chalk.bold("Examples:")}
   # Interactive mode
   ${APP_NAME}
-
-  # Start local serve mode
-  ${APP_NAME} serve --provider opencode-go --model deepseek-v4-pro
-
-  # Start the local daemon, then submit work to a thread
-  ${APP_NAME} daemon start --provider opencode-go --model deepseek-v4-pro
-  ${APP_NAME} daemon submit --thread demo "Inspect the current repository state"
 
   # Taste learning with Command-Code model parameter
   ${APP_NAME} taste learn . --max-commits 200 --max-signals 50 --model commandcode/deepseek/deepseek-v4-pro

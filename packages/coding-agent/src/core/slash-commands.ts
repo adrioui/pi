@@ -22,6 +22,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "configure-models", description: "Configure feature model assignments (goal verifier, observer, etc.)" },
 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
 	{ name: "import", description: "Import and resume a session from a JSONL file" },
+	{ name: "import-session", description: "Import another agent session as context" },
 	{ name: "share", description: "Share session as a secret GitHub gist" },
 	{ name: "copy", description: "Copy last agent message to clipboard" },
 	{ name: "name", description: "Set session display name" },

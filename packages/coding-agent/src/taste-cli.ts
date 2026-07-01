@@ -1,9 +1,7 @@
 import { type AgentSessionServices, createAgentSessionServices } from "./core/agent-session-services.ts";
 import { resolvePreferredAuxModel } from "./core/aux-model.ts";
-import { type AgentId, discoverSessions, extractBatchedPrompts } from "./core/session-importer.ts";
 import { TasteProfileStore, type TasteScope } from "./core/taste.ts";
-import { runLearnPipeline, runLearnPipelineFromSignals } from "./core/taste-git-history.ts";
-import { loadTasteOnboardingState, saveTasteOnboardingState } from "./core/taste-onboarding.ts";
+import { runLearnPipeline } from "./core/taste-git-history.ts";
 import { parsePackageSlug, TasteRegistry } from "./core/taste-registry.ts";
 import { resolvePath } from "./utils/paths.ts";
 
@@ -119,61 +117,6 @@ export async function handleTasteCommand(args: string[]): Promise<boolean> {
 			scope,
 		});
 		console.log(JSON.stringify(result, null, 2));
-		return true;
-	}
-
-	if (subcommand === "learn-from-sessions") {
-		const agentFilter = mutableArgs[0] as AgentId | undefined;
-		const sessions = discoverSessions(agentFilter);
-		if (sessions.length === 0) {
-			console.log(JSON.stringify({ discovered: 0, message: "No sessions found from any agent." }, null, 2));
-			return true;
-		}
-		const batched = extractBatchedPrompts(sessions);
-		const services = await createAgentSessionServices({ cwd: workspace });
-		const model = resolveTasteModel(services, provider, modelId);
-		let learned = 0;
-		let skipped = 0;
-		const errors: string[] = [];
-		const onboardingState = loadTasteOnboardingState(workspace);
-		for (const entry of batched) {
-			const alreadyLearned = onboardingState.learnedSessions[entry.agent] ?? [];
-			if (alreadyLearned.includes(entry.sessionPath)) {
-				skipped++;
-				continue;
-			}
-			for (const batch of entry.batches) {
-				try {
-					await runLearnPipelineFromSignals({
-						signals: [batch],
-						services,
-						model,
-						sessionId: `taste-import-${Date.now()}`,
-						destinationCwd: workspace,
-						scope,
-						systemPrompt: [
-							"You infer durable coding taste from prior user prompts across coding-agent sessions.",
-							"Use only repeated or strongly implied preferences from the prompts.",
-							"Return Command-Code markdown only:",
-							"# Code Style",
-							"- <rule>. confidence: <0.00-1.00>",
-							"Group rules under concise # headers. Capture no secrets or one-off task facts.",
-						].join("\n"),
-					});
-					learned++;
-				} catch (err) {
-					skipped++;
-					errors.push(`${entry.agent}/${entry.sessionPath}: ${err instanceof Error ? err.message : String(err)}`);
-				}
-			}
-			const learnedList = onboardingState.learnedSessions[entry.agent] ?? [];
-			learnedList.push(entry.sessionPath);
-			onboardingState.learnedSessions[entry.agent] = learnedList;
-		}
-		onboardingState.lastLearningDate = new Date().toISOString();
-		if (learned > 0) onboardingState.completed = true;
-		saveTasteOnboardingState(workspace, onboardingState);
-		console.log(JSON.stringify({ discovered: sessions.length, learned, skipped, errors }, null, 2));
 		return true;
 	}
 

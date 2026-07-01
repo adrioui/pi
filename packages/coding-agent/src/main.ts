@@ -15,7 +15,7 @@ import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
-import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
+import { ENV_SESSION_DIR, expandTildePath, getAgentDir, VERSION } from "./config.ts";
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
 import {
 	type AgentSessionRuntimeDiagnostic,
@@ -43,16 +43,13 @@ import { assertValidSessionId, SessionManager } from "./core/session-manager.ts"
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
-import { runDaemonMode } from "./daemon/daemon-mode.ts";
-import { handleDaemonClientCommand, parseDaemonCommand } from "./daemon-cli.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
-import { InteractiveMode, runPrintMode, runRpcMode, runServeMode } from "./modes/index.ts";
+import { InteractiveMode, runPrintMode } from "./modes/index.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { handleSessionsCommand } from "./sessions-cli.ts";
 import { handleTasteCommand } from "./taste-cli.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
-import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
 const EXTENSION_LOAD_FAILURE_HINT = 'Hint: Start without extensions using "pi -ne".';
 
@@ -102,21 +99,7 @@ function isTruthyEnvFlag(value: string | undefined): boolean {
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }
 
-function takeFlagValue(args: string[], name: string): string | undefined {
-	const index = args.indexOf(name);
-	if (index === -1) return undefined;
-	const value = args[index + 1];
-	if (!value || value.startsWith("-")) {
-		throw new Error(`${name} requires a value`);
-	}
-	args.splice(index, 2);
-	return value;
-}
-
 function resolveAppMode(parsed: Args, stdinIsTTY: boolean, stdoutIsTTY: boolean): AppMode {
-	if (parsed.mode === "rpc") {
-		return "rpc";
-	}
 	if (parsed.mode === "json") {
 		return "json";
 	}
@@ -126,7 +109,7 @@ function resolveAppMode(parsed: Args, stdinIsTTY: boolean, stdoutIsTTY: boolean)
 	return "interactive";
 }
 
-function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc"> {
+function toPrintOutputMode(appMode: AppMode): Mode {
 	return appMode === "json" ? "json" : "text";
 }
 
@@ -488,55 +471,15 @@ export interface MainOptions {
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
-	let effectiveArgs = [...args];
-	const daemonCommand = parseDaemonCommand(effectiveArgs);
+	const effectiveArgs = [...args];
 	if (await handleTasteCommand(effectiveArgs)) {
 		return;
-	}
-	if (await handleDaemonClientCommand(daemonCommand)) {
-		return;
-	}
-
-	let startDaemon = false;
-	let daemonSocketPath: string | undefined;
-	if (daemonCommand.kind === "start") {
-		startDaemon = true;
-		daemonSocketPath = daemonCommand.socketPath;
-		effectiveArgs = daemonCommand.remainingArgs;
-	}
-
-	let startServe = false;
-	let servePort = 3141;
-	let serveHost = "127.0.0.1";
-	if (effectiveArgs[0] === "serve") {
-		startServe = true;
-		effectiveArgs = effectiveArgs.slice(1);
-		const port = takeFlagValue(effectiveArgs, "--port");
-		const host = takeFlagValue(effectiveArgs, "--host");
-		if (port) {
-			const parsedPort = Number.parseInt(port, 10);
-			if (!Number.isFinite(parsedPort) || parsedPort <= 0) {
-				throw new Error(`Invalid --port value: ${port}`);
-			}
-			servePort = parsedPort;
-		}
-		if (host) {
-			serveHost = host;
-		}
-	}
-
-	if (effectiveArgs[0] === "headless") {
-		effectiveArgs = ["--mode", "rpc", ...effectiveArgs.slice(1)];
 	}
 
 	const offlineMode = effectiveArgs.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";
 		process.env.PI_SKIP_VERSION_CHECK = "1";
-	}
-
-	if (process.platform === "win32") {
-		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
 	}
 
 	const cwd = process.cwd();
@@ -601,11 +544,6 @@ export async function main(args: string[], options?: MainOptions) {
 	const shouldTakeOverStdout = appMode !== "interactive" && !isPlainRuntimeMetadataCommand(parsed);
 	if (shouldTakeOverStdout) {
 		takeOverStdout();
-	}
-
-	if (parsed.mode === "rpc" && parsed.fileArgs.length > 0) {
-		console.error(chalk.red("Error: @file arguments are not supported in RPC mode"));
-		process.exit(1);
 	}
 
 	validateForkFlags(parsed);
@@ -799,16 +737,6 @@ export async function main(args: string[], options?: MainOptions) {
 		};
 	};
 	time("createRuntime");
-	if (startDaemon) {
-		printTimings();
-		await runDaemonMode(createRuntime, {
-			agentDir,
-			defaultCwd: sessionManager.getCwd(),
-			sessionDir: parsed.sessionDir,
-			socketPath: daemonSocketPath,
-		});
-		return;
-	}
 	const runtime = await createAgentSessionRuntime(createRuntime, {
 		cwd: sessionManager.getCwd(),
 		agentDir,
@@ -834,23 +762,10 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(0);
 	}
 
-	if (startServe) {
-		reportDiagnostics(runtime.diagnostics);
-		if (runtime.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
-			process.exit(1);
-		}
-		printTimings();
-		await runServeMode(runtime, { port: servePort, host: serveHost });
-		return;
-	}
-
-	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
-	let stdinContent: string | undefined;
-	if (appMode !== "rpc") {
-		stdinContent = await readPipedStdin();
-		if (stdinContent !== undefined && appMode === "interactive") {
-			appMode = "print";
-		}
+	// Read piped stdin content (if any)
+	const stdinContent = await readPipedStdin();
+	if (stdinContent !== undefined && appMode === "interactive") {
+		appMode = "print";
 	}
 	time("readPipedStdin");
 
@@ -889,10 +804,7 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
-	if (appMode === "rpc") {
-		printTimings();
-		await runRpcMode(runtime);
-	} else if (appMode === "interactive") {
+	if (appMode === "interactive") {
 		const interactiveMode = new InteractiveMode(runtime, {
 			migratedProviders,
 			modelFallbackMessage,

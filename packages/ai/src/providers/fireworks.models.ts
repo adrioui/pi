@@ -21,7 +21,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 1000000,
 		maxTokens: 384000,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/models/deepseek-v4-pro": {
 		id: "accounts/fireworks/models/deepseek-v4-pro",
@@ -40,7 +39,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 1000000,
 		maxTokens: 384000,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/models/glm-5p1": {
 		id: "accounts/fireworks/models/glm-5p1",
@@ -59,7 +57,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 202800,
 		maxTokens: 131072,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/models/glm-5p2": {
 		id: "accounts/fireworks/models/glm-5p2",
@@ -79,7 +76,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 1048575,
 		maxTokens: 131072,
-		grammar: true,
 	} satisfies Model<"openai-completions">,
 	"accounts/fireworks/models/gpt-oss-120b": {
 		id: "accounts/fireworks/models/gpt-oss-120b",
@@ -98,7 +94,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 32768,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/models/gpt-oss-20b": {
 		id: "accounts/fireworks/models/gpt-oss-20b",
@@ -117,7 +112,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 131072,
 		maxTokens: 32768,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/models/kimi-k2p6": {
 		id: "accounts/fireworks/models/kimi-k2p6",
@@ -136,7 +130,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 262000,
 		maxTokens: 262000,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/models/kimi-k2p7-code": {
 		id: "accounts/fireworks/models/kimi-k2p7-code",
@@ -155,7 +148,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 262000,
 		maxTokens: 262000,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/models/minimax-m2p7": {
 		id: "accounts/fireworks/models/minimax-m2p7",
@@ -174,7 +166,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 196608,
 		maxTokens: 196608,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/models/minimax-m3": {
 		id: "accounts/fireworks/models/minimax-m3",
@@ -193,7 +184,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 512000,
 		maxTokens: 512000,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/models/qwen3p7-plus": {
 		id: "accounts/fireworks/models/qwen3p7-plus",
@@ -212,7 +202,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 262144,
 		maxTokens: 65536,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/routers/glm-5p1-fast": {
 		id: "accounts/fireworks/routers/glm-5p1-fast",
@@ -231,7 +220,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 202800,
 		maxTokens: 131072,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/routers/glm-5p2-fast": {
 		id: "accounts/fireworks/routers/glm-5p2-fast",
@@ -250,7 +238,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 1048575,
 		maxTokens: 131072,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/routers/kimi-k2p6-fast": {
 		id: "accounts/fireworks/routers/kimi-k2p6-fast",
@@ -269,7 +256,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 262000,
 		maxTokens: 262000,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/routers/kimi-k2p6-turbo": {
 		id: "accounts/fireworks/routers/kimi-k2p6-turbo",
@@ -288,7 +274,6 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 262000,
 		maxTokens: 262000,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 	"accounts/fireworks/routers/kimi-k2p7-code-fast": {
 		id: "accounts/fireworks/routers/kimi-k2p7-code-fast",
@@ -307,6 +292,5 @@ export const FIREWORKS_MODELS = {
 		},
 		contextWindow: 262000,
 		maxTokens: 262000,
-		grammar: true,
 	} satisfies Model<"anthropic-messages">,
 } as const;

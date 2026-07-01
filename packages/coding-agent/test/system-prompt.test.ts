@@ -211,7 +211,6 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("Thinking costs output tokens and time.");
 			expect(prompt).toContain("Do not recite file contents");
 			expect(prompt).toContain("Batch independent tool calls into a single turn");
-			expect(prompt).toContain("Delegate context-gathering to subagents");
 		});
 
 		test("default prompt does NOT include economics section", () => {

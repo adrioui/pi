@@ -7,7 +7,7 @@
 import type { ModelTier } from "@earendil-works/pi-event-core";
 
 const DEFAULT_TIER_MODEL_IDS: Record<ModelTier, string[]> = {
-	fast: ["deepseek/deepseek-v4-flash", "deepseek-v4-flash"],
+	fast: ["opencode/mimo-v2.5-free", "deepseek/deepseek-v4-flash", "deepseek-v4-flash"],
 	smart: ["opencode-go/glm-5.2", "zai/glm-5.2", "glm-5.2", "deepseek/deepseek-v4-pro"],
 	"smart+thinking": [
 		"opencode-go/kimi-k2.7-code",

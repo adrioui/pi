@@ -206,6 +206,22 @@ function safeExec(cwd: string, command: string, args: string[]): string | undefi
 	}
 }
 
+function parseGitStatusFiles(status: string | undefined): Map<string, string> {
+	const files = new Map<string, string>();
+	for (const line of status?.split("\n") ?? []) {
+		if (line.length < 4) continue;
+		const code = line.slice(0, 2).trim() || "modified";
+		const rawPath = line.slice(3).trim();
+		if (!rawPath) continue;
+		const renameSeparator = " -> ";
+		const filePath = rawPath.includes(renameSeparator)
+			? rawPath.slice(rawPath.lastIndexOf(renameSeparator) + renameSeparator.length)
+			: rawPath;
+		files.set(filePath, code);
+	}
+	return files;
+}
+
 function collectGitState(cwd: string): Record<string, unknown> | undefined {
 	if (!isGitRepo(cwd)) return undefined;
 	return {
@@ -1137,6 +1153,7 @@ export class SessionOrchestrator {
 		if (overview) {
 			const cwd = this.session.sessionManager.getCwd();
 			const currentGitStatus = isGitRepo(cwd) ? safeExec(cwd, "git", ["status", "--short"]) : undefined;
+			const diffSummary = isGitRepo(cwd) ? safeExec(cwd, "git", ["diff", "--stat"]) : undefined;
 			const signalType = this.classifyTasteSignal(currentGitStatus);
 			this.tasteStore.recordObservation({
 				timestamp: runtimeTimestamp(),
@@ -1150,6 +1167,7 @@ export class SessionOrchestrator {
 				model: overview.currentModel,
 				signalType,
 				changedFiles: currentGitStatus?.split("\n").filter(Boolean) ?? [],
+				diffSummary,
 			});
 			this.previousGitStatus = currentGitStatus;
 		}
@@ -1173,6 +1191,19 @@ export class SessionOrchestrator {
 		if (!currentStatus && this.previousGitStatus) return "reject";
 		if (currentStatus && !this.previousGitStatus) return "accept";
 		if (currentStatus === this.previousGitStatus) return "accept";
+
+		const previousFiles = parseGitStatusFiles(this.previousGitStatus);
+		const currentFiles = parseGitStatusFiles(currentStatus);
+		let preservedFiles = 0;
+		let editedFiles = 0;
+		for (const [filePath, previousCode] of previousFiles) {
+			const currentCode = currentFiles.get(filePath);
+			if (currentCode === undefined) continue;
+			if (currentCode === previousCode) preservedFiles++;
+			else editedFiles++;
+		}
+		if (editedFiles > 0) return "edit";
+		if (preservedFiles > 0) return "accept";
 		return "edit";
 	}
 

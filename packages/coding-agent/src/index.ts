@@ -310,18 +310,8 @@ export { type MainOptions, main } from "./main.ts";
 export {
 	InteractiveMode,
 	type InteractiveModeOptions,
-	type ModelInfo,
 	type PrintModeOptions,
-	RpcClient,
-	type RpcClientOptions,
-	type RpcCommand,
-	type RpcEventListener,
-	type RpcExtensionUIRequest,
-	type RpcExtensionUIResponse,
-	type RpcResponse,
-	type RpcSessionState,
 	runPrintMode,
-	runRpcMode,
 } from "./modes/index.ts";
 // UI components for extensions
 export {

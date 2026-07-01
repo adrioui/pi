@@ -49,12 +49,6 @@ export interface MarkdownSettings {
 	codeBlockIndent?: string; // default: "  "
 }
 
-export interface SubagentSettings {
-	enabled?: boolean; // default: false
-	finderModelProvider?: string;
-	finderModelId?: string;
-}
-
 export interface ExperimentalSettings {
 	autoSnapshot?: boolean; // default: false
 }
@@ -121,7 +115,6 @@ export interface Settings {
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
 	experimental?: ExperimentalSettings;
-	subagents?: SubagentSettings;
 	warnings?: WarningSettings;
 	tasteLearning?: boolean;
 	tasteOnboarding?: {
@@ -1221,14 +1214,6 @@ export class SettingsManager {
 	getExperimentalSettings(): ExperimentalSettings {
 		return {
 			autoSnapshot: this.settings.experimental?.autoSnapshot ?? false,
-		};
-	}
-
-	getSubagentSettings(): SubagentSettings {
-		return {
-			enabled: this.settings.subagents?.enabled ?? false,
-			finderModelProvider: this.settings.subagents?.finderModelProvider,
-			finderModelId: this.settings.subagents?.finderModelId,
 		};
 	}
 

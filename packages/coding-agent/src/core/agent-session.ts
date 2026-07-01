@@ -35,6 +35,7 @@ import {
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
+import { handleTasteCommand } from "../taste-cli.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
@@ -91,12 +92,13 @@ import { classifyError, computeJitteredDelay } from "./permissions/error-classif
 import { checkInputForGuardedPaths } from "./permissions/guarded-paths.ts";
 import { evaluatePermission, type PermissionDecision, type PermissionRule } from "./permissions/permission-gate.ts";
 import { classifyPromptVariant } from "./prompt-family.ts";
-import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+import { expandPromptTemplate, type PromptTemplate, parseCommandArgs } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import { loadReviewChecks } from "./review-checks.ts";
+import { LEADER_PROMPT } from "./role-prompts/leader.ts";
 import { ScratchpadManager } from "./scratchpad-manager.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
+import { readSessionContext } from "./session-reader.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createCheckpointId, createSnapshot, isGitRepo } from "./snapshot.ts";
@@ -104,27 +106,17 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createCheckpointChangesToolDefinition } from "./tools/checkpoint-changes.ts";
-import { createCodeReviewToolDefinition } from "./tools/code-review.ts";
 import { createCreateTaskToolDefinition } from "./tools/create-task.ts";
-import { createEscalateToolDefinition } from "./tools/escalate.ts";
-import { createFindFilesToolDefinition } from "./tools/find-files.ts";
-import { createFindSessionToolDefinition } from "./tools/find-session.ts";
 import { createFinishGoalToolDefinition } from "./tools/finish-goal.ts";
-import { createHandoffToolDefinition } from "./tools/handoff.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createKillWorkerToolDefinition } from "./tools/kill-worker.ts";
 import { createMessageAdvisorToolDefinition } from "./tools/message-advisor.ts";
 import { createMessageWorkerToolDefinition } from "./tools/message-worker.ts";
-import { createOracleToolDefinition } from "./tools/oracle.ts";
-import { createPassToolDefinition } from "./tools/pass.ts";
-import { createReadSessionToolDefinition } from "./tools/read-session.ts";
 import { createReassignWorkerToolDefinition } from "./tools/reassign-worker.ts";
 import { createRestoreSnapshotToolDefinition } from "./tools/restore-snapshot.ts";
 import { createScratchpadLoadToolDefinition } from "./tools/scratchpad-load.ts";
 import { createScratchpadSaveToolDefinition } from "./tools/scratchpad-save.ts";
 import { createSpawnWorkerToolDefinition } from "./tools/spawn-worker.ts";
-import { createTaskToolDefinition } from "./tools/task.ts";
-import { createTaskListToolDefinition } from "./tools/task-list.ts";
 import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/tool-definition-wrapper.ts";
 import { createUpdateTaskToolDefinition } from "./tools/update-task.ts";
 import { createWebFetchToolDefinition } from "./tools/web-fetch.ts";
@@ -1250,8 +1242,11 @@ export class AgentSession {
 		}
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPrompt =
-			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
+		const multiAgentEnabled = process.env.PI_ENABLE_MULTI_AGENT !== "0";
+		const appendParts: string[] = [];
+		if (loaderAppendSystemPrompt.length > 0) appendParts.push(loaderAppendSystemPrompt.join("\n\n"));
+		if (multiAgentEnabled) appendParts.push(LEADER_PROMPT);
+		const appendSystemPrompt = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
@@ -1433,8 +1428,37 @@ export class AgentSession {
 			// Handle /learn-taste command
 			if (expandPromptTemplates && text.trim() === "/learn-taste") {
 				preflightResult?.(true);
-				const { handleTasteCommand } = await import("../taste-cli.ts");
-				await handleTasteCommand(["taste", "learn-from-sessions"]);
+				await handleTasteCommand(["taste", "learn", this.sessionManager.getCwd()]);
+				return;
+			}
+
+			if (
+				expandPromptTemplates &&
+				(text.trim() === "/import-session" || text.trim().startsWith("/import-session "))
+			) {
+				preflightResult?.(true);
+				const args = parseCommandArgs(text.trim().slice("/import-session".length).trim());
+				const inputPath = args[0];
+				if (!inputPath) {
+					throw new Error("Usage: /import-session <path.jsonl>");
+				}
+				const sessionContext = readSessionContext(resolvePath(inputPath, this._cwd));
+				await this.sendCustomMessage(
+					{
+						customType: "previous-session-context",
+						content: [
+							"<previous_session_context>",
+							`Source: ${sessionContext.path}`,
+							`Messages: ${sessionContext.messages.length}`,
+							"",
+							sessionContext.text,
+							"</previous_session_context>",
+						].join("\n"),
+						display: true,
+						details: { path: sessionContext.path, messageCount: sessionContext.messages.length },
+					},
+					undefined,
+				);
 				return;
 			}
 
@@ -2901,59 +2925,6 @@ export class AgentSession {
 				wrapToolDefinition(loadDef, () => runner.createContext()),
 			);
 		}
-		if (isAllowedBuiltinAddon("task_list")) {
-			const taskListDef = createTaskListToolDefinition();
-			const taskListEntry: ToolDefinitionEntry = {
-				definition: taskListDef,
-				sourceInfo: createSyntheticSourceInfo("<builtin:task_list>", {
-					source: "builtin",
-				}),
-			};
-			this._toolDefinitions.set("task_list", taskListEntry);
-			toolRegistry.set(
-				"task_list",
-				wrapToolDefinition(taskListDef, () => runner.createContext()),
-			);
-		}
-		if (isAllowedBuiltinAddon("find_session")) {
-			const findSessionDef = createFindSessionToolDefinition();
-			this._toolDefinitions.set("find_session", {
-				definition: findSessionDef,
-				sourceInfo: createSyntheticSourceInfo("<builtin:find_session>", {
-					source: "builtin",
-				}),
-			});
-			toolRegistry.set(
-				"find_session",
-				wrapToolDefinition(findSessionDef, () => runner.createContext()),
-			);
-		}
-		if (isAllowedBuiltinAddon("read_session")) {
-			const readSessionDef = createReadSessionToolDefinition();
-			this._toolDefinitions.set("read_session", {
-				definition: readSessionDef,
-				sourceInfo: createSyntheticSourceInfo("<builtin:read_session>", {
-					source: "builtin",
-				}),
-			});
-			toolRegistry.set(
-				"read_session",
-				wrapToolDefinition(readSessionDef, () => runner.createContext()),
-			);
-		}
-		if (isAllowedBuiltinAddon("handoff")) {
-			const handoffDef = createHandoffToolDefinition(this._cwd);
-			this._toolDefinitions.set("handoff", {
-				definition: handoffDef,
-				sourceInfo: createSyntheticSourceInfo("<builtin:handoff>", {
-					source: "builtin",
-				}),
-			});
-			toolRegistry.set(
-				"handoff",
-				wrapToolDefinition(handoffDef, () => runner.createContext()),
-			);
-		}
 		if (isAllowedBuiltinAddon("web_search")) {
 			const webSearchDef = createWebSearchToolDefinition();
 			this._toolDefinitions.set("web_search", {
@@ -2991,8 +2962,6 @@ export class AgentSession {
 				["createTask", createCreateTaskToolDefinition()],
 				["updateTask", createUpdateTaskToolDefinition()],
 				["finishGoal", createFinishGoalToolDefinition()],
-				["pass", createPassToolDefinition()],
-				["escalate", createEscalateToolDefinition()],
 				["reassignWorker", createReassignWorkerToolDefinition()],
 				["messageAdvisor", createMessageAdvisorToolDefinition()],
 			] as const;
@@ -3010,121 +2979,6 @@ export class AgentSession {
 				);
 			}
 		}
-
-		// Register find_files / oracle / task subagent tools when subagents are enabled
-		const subagentSettings = this.settingsManager?.getSubagentSettings();
-		const subagentsEnabled = subagentSettings?.enabled ?? false;
-		if (subagentsEnabled) {
-			// Build SubagentTool adapters from the base built-in tools the main
-			// agent has. These reuse the already-registered tool definitions so the
-			// subagents run against the same implementations (and overrides).
-			// Each delegated call routes through the permission gate and
-			// guarded-path policy so subagents cannot bypass security checks.
-			const toSubagentTool = (tool: AgentTool) => ({
-				name: tool.name,
-				parameters: tool.parameters,
-				execute: (id: string, args: unknown, signal: AbortSignal | undefined) => {
-					const input = args as Record<string, unknown>;
-					const knownTools = Array.from(toolRegistry.keys());
-					const permDecision = evaluatePermission(tool.name, input, {
-						userRules: this._permissionRules,
-						interactive: false,
-						context: "subagent",
-						knownTools,
-					});
-					if (!permDecision.permitted) {
-						throw new Error(
-							`[Permission Gate] Subagent tool \`${tool.name}\` blocked. ${permDecision.reason ?? "No matching permission rule."}`,
-						);
-					}
-					const mutatingTools = new Set(["edit", "write", "bash", "edit-diff"]);
-					if (mutatingTools.has(tool.name)) {
-						const guardedPathResult = checkInputForGuardedPaths(input);
-						if (guardedPathResult) {
-							throw new Error(
-								`[Permission Gate] Subagent tool \`${tool.name}\` blocked on guarded path \`${guardedPathResult.path}\`.`,
-							);
-						}
-					}
-					return tool.execute(id, args, signal, undefined);
-				},
-			});
-			const baseTools = Array.from(toolRegistry.values());
-			const readOnlySubagentTools = baseTools
-				.filter((t) => ["grep", "find", "read", "ls", "bash"].includes(t.name))
-				.map(toSubagentTool);
-			// The task subagent may delegate the full productive surface. Each tool's
-			// availability is still re-checked per call via delegatableToolNames.
-			const delegatableTaskTools = baseTools
-				.filter((t) => ["read", "grep", "find", "ls", "bash", "edit", "write", "task_list"].includes(t.name))
-				.map(toSubagentTool);
-
-			const registerSubagentTool = (name: string, definition: ToolDefinition): void => {
-				if (!isAllowedTool(name)) return;
-				this._toolDefinitions.set(name, {
-					definition,
-					sourceInfo: createSyntheticSourceInfo(`<builtin:${name}>`, {
-						source: "builtin",
-					}),
-				});
-				const wrapped = wrapToolDefinition(definition, () => runner.createContext());
-				toolRegistry.set(name, wrapped);
-			};
-
-			if (isAllowedTool("find_files")) {
-				registerSubagentTool(
-					"find_files",
-					createFindFilesToolDefinition({
-						cwd: this._cwd,
-						model: () => this.model,
-						tools: readOnlySubagentTools,
-					}),
-				);
-			}
-
-			if (isAllowedTool("oracle")) {
-				registerSubagentTool(
-					"oracle",
-					createOracleToolDefinition({
-						cwd: this._cwd,
-						model: () => this.model,
-						tools: readOnlySubagentTools,
-					}),
-				);
-			}
-
-			if (isAllowedTool("task")) {
-				registerSubagentTool(
-					"task",
-					createTaskToolDefinition({
-						cwd: this._cwd,
-						model: () => this.model,
-						tools: delegatableTaskTools,
-						delegatableToolNames: delegatableTaskTools.map((t) => t.name),
-					}),
-				);
-			}
-
-			// code_review runs only when there are discovered checks. It uses
-			// read-only subagent tools (each check may declare more, but the
-			// baseline is read-only and never edit/write).
-			if (isAllowedTool("code_review")) {
-				const reviewChecksResult = loadReviewChecks({ cwd: this._cwd });
-				if (reviewChecksResult.checks.length > 0) {
-					registerSubagentTool(
-						"code_review",
-						createCodeReviewToolDefinition({
-							cwd: this._cwd,
-							model: () => this.model,
-							tools: readOnlySubagentTools,
-							checks: reviewChecksResult.checks,
-							delegatableToolNames: readOnlySubagentTools.map((t) => t.name),
-						}),
-					);
-				}
-			}
-		}
-
 		this._toolRegistry = toolRegistry;
 
 		const nextActiveToolNames = (
@@ -3150,14 +3004,6 @@ export class AgentSession {
 		for (const name of ["scratchpad_save", "scratchpad_load"]) {
 			if (isAllowedTool(name) && !nextActiveToolNames.includes(name)) {
 				nextActiveToolNames.push(name);
-			}
-		}
-
-		if (subagentsEnabled) {
-			for (const name of ["find_files", "oracle", "task", "code_review"]) {
-				if (isAllowedTool(name) && !nextActiveToolNames.includes(name)) {
-					nextActiveToolNames.push(name);
-				}
 			}
 		}
 

@@ -98,6 +98,30 @@ function parseTasteLines(content: string): string[] {
 	return normalizeTasteLines(content.split("\n"));
 }
 
+function tasteSignalWeight(signalType: TasteSignalType): number {
+	switch (signalType) {
+		case "accept":
+			return 1.15;
+		case "edit":
+			return 1.05;
+		case "observe":
+			return 1;
+		case "reject":
+			return 0.7;
+	}
+}
+
+function clampConfidence(value: number): number {
+	return Math.max(0, Math.min(1, value));
+}
+
+function adjustTasteLineConfidence(line: string, weight: number): string {
+	const match = line.match(/^(.*confidence:\s*)(0(?:\.\d{1,2})?|1(?:\.0{1,2})?)$/i);
+	if (!match) return line;
+	const adjusted = clampConfidence(Number.parseFloat(match[2]) * weight);
+	return `${match[1]}${adjusted.toFixed(2)}`;
+}
+
 export function findLookaheadEnd(lines: string[], startIndex: number): number {
 	for (let index = startIndex + 1; index < lines.length; index++) {
 		if (lines[index]?.startsWith("# ")) return index;
@@ -263,8 +287,15 @@ export class TasteProfileStore {
 
 	reorganize(cwd: string): TasteLearnResult {
 		const status = this.status(cwd);
+		const observations = this.readLatestObservations(cwd, 200);
+		const signalWeight =
+			observations.length === 0
+				? 1
+				: observations.reduce((sum, observation) => sum + tasteSignalWeight(observation.signalType), 0) /
+					observations.length;
 		const lines = parseTasteLines(this.getProfile(cwd) ?? "")
 			.filter((line) => !line.startsWith("# "))
+			.map((line) => adjustTasteLineConfidence(line, signalWeight))
 			.sort((left, right) => left.localeCompare(right));
 		const content = ["# General", ...lines].join("\n") + (lines.length > 0 ? "\n" : "");
 		this.ensureWorkspace(cwd);
