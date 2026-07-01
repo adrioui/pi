@@ -44,6 +44,9 @@ export class StreamingFieldParser {
 	}
 
 	push(chunk: string): StreamingFieldEvent[] {
+		this._valid = true;
+		this._validationIssue = undefined;
+		this._fieldPath = undefined;
 		const tokenizerSnap = this.tokenizer.snapshot();
 		const machineSnap = this.machine.snapshot();
 		const differSnap = this.fieldDiffer.snapshot();
@@ -152,6 +155,9 @@ export class StreamingFieldParser {
 		this.machine.restore(snap.machine);
 		this.fieldDiffer.restore(snap.fieldDiffer);
 		this._partial = this.machine.buildPartial();
+		this._valid = true;
+		this._validationIssue = undefined;
+		this._fieldPath = undefined;
 	}
 
 	getValidationState(): ValidationState {

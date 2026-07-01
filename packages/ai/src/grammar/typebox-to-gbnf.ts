@@ -58,6 +58,14 @@ export function typeboxToGbnf(schema: TSchema, rootName = "root"): string {
 function compileSchema(schema: TSchema, name: string, ctx: GbnfContext): string {
 	const type = (schema as { type?: string | string[] }).type;
 
+	// 11.2: Detect recursive/self-referencing schemas
+	const ref = (schema as { $ref?: string }).$ref ?? (schema as { $id?: string }).$id;
+	if (ref && ctx.rules.has(ref)) {
+		// Reference to an already-compiled rule — enables recursion
+		ctx.seenRefs.add(ref);
+		return ref;
+	}
+
 	const allOf = (schema as { allOf?: TSchema[] }).allOf;
 	if (allOf && allOf.length > 0) {
 		return compileObject(mergeObjectSchemas(allOf), name, ctx);
@@ -135,9 +143,29 @@ function compileObject(schema: TSchema, name: string, ctx: GbnfContext): string 
 }
 
 function compileArray(schema: TSchema, name: string, ctx: GbnfContext): string {
-	const items = (schema as { items?: TSchema }).items;
+	const items = (schema as { items?: TSchema | TSchema[] }).items;
 	markPrimitive(ctx, "ws");
 	if (!items) return '"[" ws "]"';
+
+	// Tuple schema: items is an array of schemas (positional)
+	if (Array.isArray(items)) {
+		if (items.length === 0) return '"[" ws "]"';
+		const elementRules = items.map((itemSchema, i) => {
+			const itemType = (itemSchema as { type?: string }).type;
+			if (itemType === "object" || itemType === "array") {
+				const elemName = `${name}_elem${i}`;
+				if (!ctx.rules.has(elemName) && !ctx.seenRefs.has(elemName)) {
+					ctx.seenRefs.add(elemName);
+					const elemRule = compileSchema(itemSchema, elemName, ctx);
+					ctx.rules.set(elemName, elemRule);
+				}
+				return elemName;
+			}
+			return compileSchema(itemSchema, `${name}_elem${i}`, ctx);
+		});
+		const body = elementRules.join(' ws "," ws ');
+		return `"[" ws ${body} ws "]"`;
+	}
 
 	const itemType = (items as { type?: string }).type;
 	if (itemType === "object" || itemType === "array") {
@@ -156,13 +184,22 @@ function compileArray(schema: TSchema, name: string, ctx: GbnfContext): string {
 
 function compilePrimitive(type: string | string[] | undefined, _schema: TSchema, ctx: GbnfContext): string {
 	switch (type) {
-		case "string":
+		case "string": {
 			markPrimitive(ctx, "string");
+			const pattern = (_schema as { pattern?: string }).pattern;
+			if (pattern) {
+				// GBNF doesn't support full regex; fall back to string rule
+				// Pattern constraints are validated at the schema-adapter level instead
+			}
 			return "string";
+		}
 		case "number":
-		case "integer":
+		case "integer": {
 			markPrimitive(ctx, "number");
+			// minimum/maximum constraints validated at schema-adapter level
+			// GBNF number rule already constrains to numeric format
 			return "number";
+		}
 		case "boolean":
 			return '("true" | "false")';
 		case "null":

@@ -26,6 +26,16 @@ export interface Token {
 	offset: number;
 }
 
+const JSON_ESCAPE_MAP: Record<string, string> = {
+	n: "\n",
+	t: "\t",
+	r: "\r",
+	b: "\b",
+	f: "\f",
+	'"': '"',
+	"\\": "\\",
+	"/": "/",
+};
 type TokenSink = (token: Token) => void;
 
 /** Snapshot of tokenizer state for restore(). */
@@ -127,7 +137,7 @@ export class JsonTokenizer {
 		}
 
 		if (this.literalBuffer.length > 0) {
-			if (/[a-z]/.test(char)) {
+			if (/[a-zA-Z]/.test(char)) {
 				this.literalBuffer += char;
 				this.offset++;
 				return;
@@ -166,7 +176,7 @@ export class JsonTokenizer {
 					this.numberBuffer = char;
 					break;
 				}
-				if (/[a-z]/.test(char)) {
+				if (/[a-zA-Z]/.test(char)) {
 					this.literalBuffer = char;
 					break;
 				}
@@ -190,7 +200,7 @@ export class JsonTokenizer {
 				this.unicodeBuffer = "u";
 				this.stringBuffer += char;
 			} else {
-				this.stringBuffer += char;
+				this.stringBuffer += JSON_ESCAPE_MAP[char] ?? char;
 			}
 			this.escapeNext = false;
 			return;

@@ -186,6 +186,16 @@ export function validatePartialAgainstSchema(
 				);
 				if (!result.valid) return result;
 			}
+		} else {
+			for (const key of Object.keys(obj)) {
+				if (!namedChildren.has(key)) {
+					return {
+						valid: false,
+						issue: `Unknown field: ${path === "root" ? key : `${path}.${key}`}`,
+						fieldPath: path === "root" ? key : `${path}.${key}`,
+					};
+				}
+			}
 		}
 		return { valid: true };
 	}
@@ -205,7 +215,18 @@ export function validatePartialAgainstSchema(
 	if (schema.type === "union" && schema.children) {
 		const results = schema.children.map((child) => validatePartialAgainstSchema(partial, child, path));
 		if (results.some((result) => result.valid)) return { valid: true };
-		return results[0] ?? { valid: false, issue: `Field "${path}" did not match any union branch`, fieldPath: path };
+		const errors = results
+			.filter((r) => !r.valid)
+			.map((r) => r.issue)
+			.filter(Boolean);
+		return {
+			valid: false,
+			issue:
+				errors.length > 0
+					? `Field "${path}" did not match any union branch: ${errors.join("; ")}`
+					: `Field "${path}" did not match any union branch`,
+			fieldPath: path,
+		};
 	}
 
 	if (schema.enumValues) {

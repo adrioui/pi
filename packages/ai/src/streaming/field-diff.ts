@@ -71,7 +71,7 @@ export class FieldDiffer {
 							events.push({ type: "field_end", path: childPath, value: childValue, complete: true });
 							this.seen.set(childPath, { seenText: text, complete: true });
 						} else if (text !== existing.seenText) {
-							events.push({ type: "field_delta", path: childPath, value: childValue, complete: true });
+							events.push({ type: "field_delta", path: childPath, value: childValue, complete: false });
 							events.push({ type: "field_end", path: childPath, value: childValue, complete: true });
 							existing.seenText = text;
 							existing.complete = true;
