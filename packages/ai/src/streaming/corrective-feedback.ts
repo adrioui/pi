@@ -10,7 +10,7 @@ import type { ValidationState } from "./typebox-schema-adapter.ts";
 export function formatCorrectiveFeedback(issue: ValidationState): string {
 	const lines = [
 		"Tool call validation failed during streaming:",
-		`- ${issue.issue ?? "Unknown validation error"}`,
+		`- ${issue.fieldPath ? `Field "${issue.fieldPath}": ` : ""}${issue.issue ?? "Unknown validation error"}`,
 		"",
 		"The tool call was aborted. Please retry with valid arguments.",
 	];

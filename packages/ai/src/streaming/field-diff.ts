@@ -58,15 +58,23 @@ export class FieldDiffer {
 							this.seen.set(childPath, { seenText: "", complete: false });
 						}
 						this.diffValue(childValue, childPath, events);
+						const entry = this.seen.get(childPath);
+						if (entry && !entry.complete) {
+							events.push({ type: "field_end", path: childPath, value: childValue, complete: true });
+							entry.complete = true;
+						}
 					} else {
 						const text = String(childValue ?? "");
 						const existing = this.seen.get(childPath);
 						if (!existing) {
-							events.push({ type: "field_start", path: childPath, value: childValue, complete: true });
+							events.push({ type: "field_start", path: childPath, value: childValue, complete: false });
+							events.push({ type: "field_end", path: childPath, value: childValue, complete: true });
 							this.seen.set(childPath, { seenText: text, complete: true });
 						} else if (text !== existing.seenText) {
 							events.push({ type: "field_delta", path: childPath, value: childValue, complete: true });
+							events.push({ type: "field_end", path: childPath, value: childValue, complete: true });
 							existing.seenText = text;
+							existing.complete = true;
 						}
 					}
 				}

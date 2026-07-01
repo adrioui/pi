@@ -3,9 +3,8 @@
  *
  * Uses operations as data (Op type) applied through a single apply() method.
  * Frames are immutable: created fresh in handlers, never mutated in place.
- * Snapshot is a shallow copy of the stack for full parser resets only.
- * Per-chunk rollback uses ops-as-rollback: collect speculative ops without
- * applying, discard on validation failure.
+ * Parser-level snapshot/restore handles per-chunk validation rollback and full
+ * parser resets.
  */
 
 export type FrameType = "root" | "object" | "array";

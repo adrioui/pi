@@ -2,9 +2,8 @@
  * Public API for the operation-based streaming field parser.
  *
  * Combines the tokenizer, stack machine, handlers, field diff, and schema validation
- * into a single cohesive parser. Per-chunk rollback uses ops-as-rollback: collect
- * speculative ops without applying, discard on validation failure. Snapshot/restore
- * is only for full parser resets.
+ * into a single cohesive parser. Per-chunk rollback uses tokenizer, machine, and
+ * field differ snapshots taken before each chunk.
  */
 
 import { type FieldDiffEvent, FieldDiffer } from "./field-diff.ts";
@@ -35,6 +34,7 @@ export class StreamingFieldParser {
 	private _partial: unknown = undefined;
 	private _valid = true;
 	private _validationIssue?: string;
+	private _fieldPath?: string;
 
 	constructor(schema?: StreamingSchemaField) {
 		this.schema = schema;
@@ -48,7 +48,6 @@ export class StreamingFieldParser {
 		const machineSnap = this.machine.snapshot();
 		const differSnap = this.fieldDiffer.snapshot();
 
-		const speculativeOps: ReturnType<typeof handleToken> = [];
 		const ctx: HandlerContext = { pendingValue: undefined };
 
 		let failed = false;
@@ -59,7 +58,6 @@ export class StreamingFieldParser {
 			ctx.pendingValue = this.tokenizer.pendingValue;
 			for (const token of this.emittedTokens.filter((t) => t.type !== "eof")) {
 				const ops = handleToken(token, this.machine.peek(), ctx);
-				speculativeOps.push(...ops);
 
 				if (ops.length > 0) {
 					this.machine.apply(ops);
@@ -70,6 +68,7 @@ export class StreamingFieldParser {
 							failed = true;
 							this._valid = false;
 							this._validationIssue = validation.issue;
+							this._fieldPath = validation.fieldPath;
 							break;
 						}
 					}
@@ -100,6 +99,18 @@ export class StreamingFieldParser {
 					}
 				}
 			}
+			if (this.schema) {
+				const validation = validatePartialAgainstSchema(this._partial, this.schema);
+				if (!validation.valid) {
+					this.tokenizer.restore(tokenizerSnap);
+					this.machine.restore(machineSnap);
+					this.fieldDiffer.restore(differSnap);
+					this._valid = false;
+					this._validationIssue = validation.issue;
+					this._fieldPath = validation.fieldPath;
+					return [];
+				}
+			}
 			return this.fieldDiffer.walkAndDiff(this._partial);
 		} catch {
 			this.tokenizer.restore(tokenizerSnap);
@@ -107,6 +118,7 @@ export class StreamingFieldParser {
 			this.fieldDiffer.restore(differSnap);
 			this._valid = false;
 			this._validationIssue = "Parse error during streaming";
+			this._fieldPath = undefined;
 			return [];
 		}
 	}
@@ -143,6 +155,6 @@ export class StreamingFieldParser {
 	}
 
 	getValidationState(): ValidationState {
-		return { valid: this._valid, issue: this._validationIssue };
+		return { valid: this._valid, issue: this._validationIssue, fieldPath: this._fieldPath };
 	}
 }

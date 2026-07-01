@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import { typeboxToGbnf } from "../src/grammar/index.ts";
 import {
 	StreamingFieldParser,
 	typeboxToStreamingSchema,
@@ -68,14 +69,89 @@ describe("StreamingFieldParser", () => {
 		expect(result.valid).toBe(false);
 		expect(result.issue).toContain("must be one of");
 	});
+
+	it("marks Type.Optional fields as optional from parent required metadata", () => {
+		const schema = typeboxToStreamingSchema(Type.Object({ name: Type.String(), note: Type.Optional(Type.String()) }));
+		const note = schema.children?.find((child) => child.name === "note");
+		expect(note?.required).toBe(false);
+	});
+
+	it("validates Type.Integer fields as numbers", () => {
+		const schema = typeboxToStreamingSchema(Type.Object({ count: Type.Integer() }));
+		const result = validatePartialAgainstSchema({ count: "1" }, schema);
+		expect(result.valid).toBe(false);
+		expect(result.issue).toContain("expected type number");
+	});
+
+	it("includes field path for nested validation errors", () => {
+		const schema = typeboxToStreamingSchema(Type.Object({ config: Type.Object({ count: Type.Number() }) }));
+		const result = validatePartialAgainstSchema({ config: { count: "1" } }, schema);
+		expect(result.valid).toBe(false);
+		expect(result.fieldPath).toBe("config.count");
+	});
 });
 
 describe("typeboxToGbnf", () => {
 	it("generates GBNF for simple object", () => {
-		const gbnf = typeboxToStreamingSchema(Type.Object({ name: Type.String() }));
-		expect(gbnf.type).toBe("object");
-		expect(gbnf.children).toBeDefined();
-		expect(gbnf.children![0]!.name).toBe("name");
-		expect(gbnf.children![0]!.type).toBe("string");
+		const gbnf = typeboxToGbnf(Type.Object({ name: Type.String() }));
+		expect(gbnf).toContain("root ::=");
+		expect(gbnf).toContain("string ::=");
+		expect(gbnf).toContain("ws ::=");
+	});
+
+	it("generates alternatives for Type.Union literals", () => {
+		const gbnf = typeboxToGbnf(
+			Type.Object({ status: Type.Union([Type.Literal("active"), Type.Literal("inactive")]) }),
+		);
+		expect(gbnf).toContain('"\\"active\\"" | "\\"inactive\\""');
+		expect(gbnf).not.toContain('ws "" ws');
+	});
+
+	it("makes optional object properties omittable", () => {
+		const gbnf = typeboxToGbnf(Type.Object({ name: Type.String(), note: Type.Optional(Type.String()) }));
+		expect(gbnf).toContain('root ::= "{" ws "\\"name\\"" ws ":" ws string root_optional_after_required ws "}"');
+		expect(gbnf).toContain('root_optional_after_required ::= ("" | ws "," ws "\\"note\\"" ws ":" ws string)');
+		expect(gbnf).toContain('"\\"note\\"" ws ":" ws string');
+	});
+
+	it("keeps all-optional object properties optional", () => {
+		const gbnf = typeboxToGbnf(
+			Type.Object({ first: Type.Optional(Type.String()), second: Type.Optional(Type.Number()) }),
+		);
+		expect(gbnf).toContain('root ::= "{" ws root_optional_start ws "}"');
+		expect(gbnf).toContain('root_optional_start ::= ("" | "\\"first\\"" ws ":" ws string');
+		expect(gbnf).toContain('"\\"second\\"" ws ":" ws number');
+	});
+
+	it("does not inject primitive rules from matching property names", () => {
+		const gbnf = typeboxToGbnf(Type.Object({ value: Type.String() }));
+		expect(gbnf).toContain('"\\"value\\"" ws ":" ws string');
+		expect(gbnf).not.toContain("\nvalue ::=");
+	});
+
+	it("compiles Type.Any and Type.Unknown as JSON values", () => {
+		const gbnf = typeboxToGbnf(Type.Object({ any: Type.Any(), unknown: Type.Unknown() }));
+		expect(gbnf).toContain('"\\"any\\"" ws ":" ws value');
+		expect(gbnf).toContain('"\\"unknown\\"" ws ":" ws value');
+		expect(gbnf).toContain("value ::= string | number");
+	});
+
+	it("compiles Type.Intersect object schemas", () => {
+		const gbnf = typeboxToGbnf(
+			Type.Intersect([Type.Object({ first: Type.String() }), Type.Object({ second: Type.Number() })]),
+		);
+		expect(gbnf).toContain('"\\"first\\"" ws ":" ws string');
+		expect(gbnf).toContain('"\\"second\\"" ws ":" ws number');
+	});
+
+	it("compiles Type.Record value schemas", () => {
+		const gbnf = typeboxToGbnf(Type.Record(Type.String(), Type.Number()));
+		expect(gbnf).toContain('root ::= "{" ws (string ws ":" ws number');
+		expect(gbnf).toContain('(ws "," ws string ws ":" ws number)*');
+	});
+
+	it("wraps boolean alternatives when embedded", () => {
+		const gbnf = typeboxToGbnf(Type.Object({ enabled: Type.Boolean() }));
+		expect(gbnf).toContain('("true" | "false")');
 	});
 });

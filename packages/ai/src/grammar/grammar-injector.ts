@@ -14,6 +14,8 @@ import { typeboxToGbnf } from "./typebox-to-gbnf.ts";
 
 const GRAMMAR_FIELD_BY_API: Partial<Record<Api, string>> = {
 	"openai-completions": "grammar",
+	vllm: "guided_grammar",
+	"llama-cpp": "grammar",
 };
 
 type PayloadHook = (payload: unknown, model: Model<Api>) => unknown | undefined | Promise<unknown | undefined>;
@@ -23,7 +25,10 @@ export function createGrammarInjector(toolSchemas: TSchema[]): PayloadHook {
 		if (!model.grammar) return undefined;
 		if (toolSchemas.length === 0) return undefined;
 
-		const gbnfRules = toolSchemas.map((schema) => typeboxToGbnf(schema)).join("\n\n");
+		const gbnfRules =
+			toolSchemas.length === 1
+				? typeboxToGbnf(toolSchemas[0]!)
+				: combineToolGrammars(toolSchemas.map((schema, index) => typeboxToGbnf(schema, `tool_${index}`)));
 		const field = model.grammarField ?? GRAMMAR_FIELD_BY_API[model.api] ?? "grammar";
 
 		if (payload && typeof payload === "object") {
@@ -32,6 +37,29 @@ export function createGrammarInjector(toolSchemas: TSchema[]): PayloadHook {
 		}
 		return payload;
 	};
+}
+
+function combineToolGrammars(grammars: string[]): string {
+	const lines = [`root ::= ${grammars.map((_, index) => `tool_${index}`).join(" | ")}`];
+	const seenRules = new Map<string, string>([["root", lines[0]!.slice("root ::=".length).trim()]]);
+	for (const grammar of grammars) {
+		for (const line of grammar.split("\n")) {
+			const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*::=\s*(.*)$/);
+			if (!match) continue;
+			const ruleName = match[1]!;
+			const ruleBody = match[2]!;
+			const existing = seenRules.get(ruleName);
+			if (existing !== undefined) {
+				if (existing !== ruleBody) {
+					console.warn(`[grammar] Rule collision for ${ruleName}: bodies differ; keeping first definition`);
+				}
+				continue;
+			}
+			seenRules.set(ruleName, ruleBody);
+			lines.push(line);
+		}
+	}
+	return lines.join("\n");
 }
 
 /**

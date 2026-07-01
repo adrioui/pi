@@ -1,9 +1,8 @@
 /**
  * Streaming JSON parsing and validation infrastructure.
  *
- * Operation-based parser with per-chunk rollback (ops-as-rollback) and
- * snapshot/restore for full resets. Validates partial JSON against Typebox
- * schemas during streaming.
+ * Operation-based parser with parser-level snapshot/restore rollback.
+ * Validates partial JSON against Typebox schemas during streaming.
  */
 
 export { formatCorrectiveFeedback } from "./corrective-feedback.ts";

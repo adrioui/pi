@@ -7,6 +7,9 @@
  * - Don't fail on missing required fields (stream is incomplete)
  * - DO fail on wrong-type fields (string where number expected)
  * - DO fail on enum violations (value not in allowed set)
+ *
+ * Typebox optionality is represented by the parent object's `required` array,
+ * not by metadata on the child schema.
  */
 
 import type { TSchema } from "typebox";
@@ -17,30 +20,54 @@ export interface StreamingSchemaField {
 	required: boolean;
 	children?: StreamingSchemaField[];
 	itemSchema?: StreamingSchemaField;
+	additionalProperties?: StreamingSchemaField;
 	enumValues?: string[];
 }
 
 export interface ValidationState {
 	valid: boolean;
 	issue?: string;
+	fieldPath?: string;
 }
 
-export function typeboxToStreamingSchema(schema: TSchema, name = "root"): StreamingSchemaField {
+export function typeboxToStreamingSchema(
+	schema: TSchema,
+	name = "root",
+	parentRequired?: readonly string[],
+): StreamingSchemaField {
 	const type = (schema as { type?: string | string[] }).type;
-	const optional = Boolean((schema as { modifier?: number }).modifier === 2); // Type.Optional modifier
+	const required = parentRequired ? parentRequired.includes(name) : true;
 	const fields: StreamingSchemaField[] = [];
+
+	const allOf = (schema as { allOf?: TSchema[] }).allOf;
+	if (allOf && allOf.length > 0) {
+		return typeboxToStreamingSchema(mergeObjectSchemas(allOf), name, parentRequired);
+	}
+
+	const patternProperties = (schema as { patternProperties?: Record<string, TSchema> }).patternProperties;
+	if (patternProperties && Object.keys(patternProperties).length > 0) {
+		const valueSchema = Object.values(patternProperties)[0];
+		return {
+			name,
+			type: "object",
+			required,
+			children: [],
+			additionalProperties: valueSchema ? typeboxToStreamingSchema(valueSchema, "*") : undefined,
+		};
+	}
 
 	if (type === "object" || (schema as { properties?: unknown }).properties) {
 		const properties = (schema as { properties?: Record<string, TSchema> }).properties;
 		if (properties) {
+			const childRequired = (schema as { required?: string[] }).required ?? [];
 			for (const key of Object.keys(properties)) {
-				fields.push(typeboxToStreamingSchema(properties[key]!, key));
+				fields.push(typeboxToStreamingSchema(properties[key]!, key, childRequired));
 			}
 		}
 		return {
 			name,
 			type: "object",
-			required: !optional,
+			required,
 			children: fields,
 		};
 	}
@@ -50,7 +77,7 @@ export function typeboxToStreamingSchema(schema: TSchema, name = "root"): Stream
 		return {
 			name,
 			type: "array",
-			required: !optional,
+			required,
 			itemSchema: items ? typeboxToStreamingSchema(items, `${name}[]`) : undefined,
 		};
 	}
@@ -59,8 +86,12 @@ export function typeboxToStreamingSchema(schema: TSchema, name = "root"): Stream
 		return {
 			name,
 			type: "union",
-			required: !optional,
-			children: type.map((t) => ({ name: `${name}.${t}`, type: t as StreamingSchemaField["type"], required: true })),
+			required,
+			children: type.map((t) => ({
+				name: `${name}.${t}`,
+				type: normalizeSchemaType(t as string),
+				required: true,
+			})),
 		};
 	}
 
@@ -72,14 +103,14 @@ export function typeboxToStreamingSchema(schema: TSchema, name = "root"): Stream
 			return {
 				name,
 				type: "string",
-				required: !optional,
+				required,
 				enumValues: literals.map(String),
 			};
 		}
 		return {
 			name,
 			type: "union",
-			required: !optional,
+			required,
 			children: anyOf.map((s) => typeboxToStreamingSchema(s, `${name}_item`)),
 		};
 	}
@@ -88,48 +119,93 @@ export function typeboxToStreamingSchema(schema: TSchema, name = "root"): Stream
 	if (enumValues) {
 		return {
 			name,
-			type: type as StreamingSchemaField["type"],
-			required: !optional,
+			type: normalizeSchemaType(type),
+			required,
 			enumValues: enumValues.map(String),
 		};
 	}
 
 	return {
 		name,
-		type: (type as StreamingSchemaField["type"]) ?? "any",
-		required: !optional,
+		type: normalizeSchemaType(type),
+		required,
 	};
 }
 
-export function validatePartialAgainstSchema(partial: unknown, schema: StreamingSchemaField): ValidationState {
+function normalizeSchemaType(type: string | string[] | undefined): StreamingSchemaField["type"] {
+	if (Array.isArray(type)) return "union";
+	if (type === "integer") return "number";
+	if (
+		type === "string" ||
+		type === "number" ||
+		type === "boolean" ||
+		type === "object" ||
+		type === "array" ||
+		type === "union" ||
+		type === "null" ||
+		type === "any"
+	) {
+		return type;
+	}
+	return "any";
+}
+
+export function validatePartialAgainstSchema(
+	partial: unknown,
+	schema: StreamingSchemaField,
+	path = schema.name,
+): ValidationState {
 	if (partial === undefined || partial === null) {
 		return { valid: true };
 	}
 
 	if (schema.type === "object" && schema.children) {
 		if (typeof partial !== "object" || Array.isArray(partial)) {
-			return { valid: false, issue: `Field "${schema.name}" expected type object` };
+			return { valid: false, issue: `Field "${path}" expected type object`, fieldPath: path };
 		}
 		const obj = partial as Record<string, unknown>;
+		const namedChildren = new Set(schema.children.map((child) => child.name));
 		for (const child of schema.children) {
 			if (!(child.name in obj)) {
 				continue;
 			}
-			const result = validatePartialAgainstSchema(obj[child.name], child);
+			const result = validatePartialAgainstSchema(
+				obj[child.name],
+				child,
+				path === "root" ? child.name : `${path}.${child.name}`,
+			);
 			if (!result.valid) return result;
+		}
+		if (schema.additionalProperties) {
+			for (const [key, value] of Object.entries(obj)) {
+				if (namedChildren.has(key)) continue;
+				const result = validatePartialAgainstSchema(
+					value,
+					schema.additionalProperties,
+					path === "root" ? key : `${path}.${key}`,
+				);
+				if (!result.valid) return result;
+			}
 		}
 		return { valid: true };
 	}
 
 	if (schema.type === "array" && schema.itemSchema) {
 		if (!Array.isArray(partial)) {
-			return { valid: false, issue: `Field "${schema.name}" expected type array` };
+			return { valid: false, issue: `Field "${path}" expected type array`, fieldPath: path };
 		}
-		for (const item of partial) {
-			const result = validatePartialAgainstSchema(item, schema.itemSchema);
+		for (let i = 0; i < partial.length; i++) {
+			const item = partial[i];
+			const result = validatePartialAgainstSchema(item, schema.itemSchema, `${path}[${i}]`);
 			if (!result.valid) return result;
 		}
 		return { valid: true };
+	}
+
+	if (schema.type === "union" && schema.children) {
+		const results = schema.children.map((child) => validatePartialAgainstSchema(partial, child, path));
+		if (results.some((result) => result.valid)) return { valid: true };
+		return results[0] ?? { valid: false, issue: `Field "${path}" did not match any union branch`, fieldPath: path };
 	}
 
 	if (schema.enumValues) {
@@ -137,21 +213,36 @@ export function validatePartialAgainstSchema(partial: unknown, schema: Streaming
 		if (!schema.enumValues.includes(value)) {
 			return {
 				valid: false,
-				issue: `Field "${schema.name}" must be one of: ${schema.enumValues.join(", ")}`,
+				issue: `Field "${path}" must be one of: ${schema.enumValues.join(", ")}`,
+				fieldPath: path,
 			};
 		}
 		return { valid: true };
 	}
 
 	if (schema.type === "string" && typeof partial !== "string") {
-		return { valid: false, issue: `Field "${schema.name}" expected type string, got ${typeof partial}` };
+		return { valid: false, issue: `Field "${path}" expected type string, got ${typeof partial}`, fieldPath: path };
 	}
 	if (schema.type === "number" && typeof partial !== "number") {
-		return { valid: false, issue: `Field "${schema.name}" expected type number, got ${typeof partial}` };
+		return { valid: false, issue: `Field "${path}" expected type number, got ${typeof partial}`, fieldPath: path };
 	}
 	if (schema.type === "boolean" && typeof partial !== "boolean") {
-		return { valid: false, issue: `Field "${schema.name}" expected type boolean, got ${typeof partial}` };
+		return { valid: false, issue: `Field "${path}" expected type boolean, got ${typeof partial}`, fieldPath: path };
 	}
 
 	return { valid: true };
+}
+
+function mergeObjectSchemas(schemas: readonly TSchema[]): TSchema {
+	const properties: Record<string, TSchema> = {};
+	const required = new Set<string>();
+	for (const schema of schemas) {
+		const subAllOf = (schema as { allOf?: TSchema[] }).allOf;
+		const normalized = subAllOf && subAllOf.length > 0 ? mergeObjectSchemas(subAllOf) : schema;
+		Object.assign(properties, (normalized as { properties?: Record<string, TSchema> }).properties ?? {});
+		for (const key of (normalized as { required?: string[] }).required ?? []) {
+			required.add(key);
+		}
+	}
+	return { type: "object", properties, required: [...required] } as TSchema;
 }
