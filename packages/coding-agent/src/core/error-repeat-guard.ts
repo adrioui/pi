@@ -30,6 +30,16 @@ export class ErrorRepeatGuard {
 			fingerprint,
 		};
 	}
+
+	recordSuccess(toolName: string, args: unknown): void {
+		const fingerprint = `${toolName}:${fingerprintArgs(args)}`;
+		// Clear all error variants for this tool+args fingerprint
+		for (const key of this.counts.keys()) {
+			if (key.startsWith(`${fingerprint}:`)) {
+				this.counts.delete(key);
+			}
+		}
+	}
 }
 
 function fingerprintArgs(value: unknown): string {

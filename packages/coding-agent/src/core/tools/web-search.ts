@@ -53,9 +53,9 @@ async function searchDuckDuckGo(query: string, maxResults: number, signal?: Abor
 	if (proxyUrl && (await isBlockedUrlResolved(proxyUrl))) {
 		throw new Error("Proxy URL is blocked by SSRF protection");
 	}
-	const fetchUrl = proxyUrl
-		? `${proxyUrl.endsWith("/") ? proxyUrl.slice(0, -1) : proxyUrl}/${encodeURIComponent(url)}`
-		: url;
+	// When using a proxy, pass the raw URL — don't double-encode.
+	// The proxy will handle the request to the target URL.
+	const fetchUrl = url;
 
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), 15000);

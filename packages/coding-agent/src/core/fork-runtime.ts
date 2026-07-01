@@ -150,7 +150,6 @@ export class ForkRuntime {
 			stopReason: "killed",
 			reason: input.reason ?? "killed by leader",
 		});
-		this.workerForkIds.delete(input.workerId);
 	}
 
 	/**

@@ -178,9 +178,12 @@ export function createRoleControlTool(name: string, description: string): ToolDe
 			try {
 				const runtime = getRuntime(ctx);
 				if (!runtime) {
-					return errorResult(
-						"Multi-agent mode is disabled (PI_ENABLE_MULTI_AGENT=0 is set). Unset this environment variable to enable role-control tools.",
-					);
+					if (process.env.PI_ENABLE_MULTI_AGENT === "0") {
+						return errorResult(
+							"Multi-agent mode is disabled (PI_ENABLE_MULTI_AGENT=0 is set). Unset this environment variable to enable role-control tools.",
+						);
+					}
+					return errorResult("Multi-agent runtime not registered. Role control tools are unavailable.");
 				}
 				return await handler(runtime, params as Record<string, unknown>);
 			} catch (err) {

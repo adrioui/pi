@@ -94,9 +94,6 @@ export function isBlockedUrl(urlStr: string): boolean {
 }
 
 async function resolveAllowedAddresses(urlStr: string): Promise<LookupAddress[] | undefined> {
-	if (isBlockedUrl(urlStr)) {
-		throw new Error(`Blocked URL "${urlStr}" by SSRF protection`);
-	}
 	let parsed: URL;
 	try {
 		parsed = new URL(urlStr);
