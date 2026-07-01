@@ -44,6 +44,7 @@ export class RoleHost<TEvent extends EventEnvelope = EventEnvelope> {
 	}
 
 	async handle(event: TEvent, extractedSignals: Signal[] = []): Promise<void> {
+		// Signals are ephemeral per-event — clear before dispatch so roles see only signals emitted for this specific event
 		this.signalBus.clear();
 		// Dispatch signals extracted by projections
 		for (const sig of extractedSignals) {

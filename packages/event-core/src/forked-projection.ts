@@ -68,6 +68,8 @@ export class ForkedProjectionStore<TEvent extends EventEnvelope = EventEnvelope>
 		return signals;
 	}
 
+	/** Replays events into both the global store and each fork store.
+	 * Each fork store receives only events belonging to that fork (filtered by forkId). */
 	replay(events: readonly TEvent[]): void {
 		this.globalStore.replay(events);
 		for (const [forkId, store] of this.forkStores) {
