@@ -153,14 +153,14 @@ export function formatEnvironmentSnapshot(provider: EnvironmentSnapshotProvider)
 	if (provider.gitStatus && provider.gitStatus.length > 0) {
 		lines.push("- git_status:");
 		for (const status of provider.gitStatus) {
-			lines.push(`  ${status}`);
+			lines.push(`  ${redactSecrets(sanitizeField(status) ?? "")}`);
 		}
 	}
 
 	if (provider.recentCommits && provider.recentCommits.length > 0) {
 		lines.push("- recent_commits:");
 		for (const commit of provider.recentCommits) {
-			lines.push(`  ${commit}`);
+			lines.push(`  ${redactSecrets(sanitizeField(commit) ?? "")}`);
 		}
 	}
 
@@ -168,7 +168,7 @@ export function formatEnvironmentSnapshot(provider: EnvironmentSnapshotProvider)
 		lines.push("- folder_structure:");
 		// Limit to 20 entries and sanitize
 		for (const entry of provider.folderStructure.slice(0, 20)) {
-			lines.push(sanitizeField(entry) ?? "");
+			lines.push(redactSecrets(sanitizeField(entry) ?? ""));
 		}
 		if (provider.folderStructure.length > 20) {
 			lines.push(`... (${provider.folderStructure.length - 20} more entries)`);
@@ -179,12 +179,15 @@ export function formatEnvironmentSnapshot(provider: EnvironmentSnapshotProvider)
 
 	if (provider.loadedSkills && provider.loadedSkills.length > 0) {
 		lines.push("- loaded_skills:");
-		for (const skill of provider.loadedSkills) {
-			lines.push(`  - ${skill.name}: ${skill.description}`);
+		for (const skill of provider.loadedSkills.slice(0, 20)) {
+			const name = redactSecrets(sanitizeField(skill.name) ?? "");
+			const description = redactSecrets(sanitizeField(skill.description) ?? "");
+			lines.push(`  - ${name}: ${description}`);
 		}
 	}
 
-	return lines.join("\n");
+	const formatted = lines.join("\n");
+	return formatted.length > 8000 ? `${formatted.slice(0, 8000)}\n... (snapshot truncated)` : formatted;
 }
 
 // --- internal helpers --------------------------------------------------------
@@ -221,6 +224,12 @@ function sanitizeField(value: string | undefined | null): string | null {
 	const cleaned = value.replace(/[\x00-\x1f\x7f]/g, "").trim();
 	if (!cleaned) return null;
 	return cleaned.length > 200 ? cleaned.slice(0, 200) : cleaned;
+}
+
+function redactSecrets(value: string): string {
+	return value
+		.replace(/([?&](?:token|key|secret|password)=)[^&\s]+/gi, "$1[REDACTED]")
+		.replace(/(?:sk|pk|ghp|gho|github_pat)_[A-Za-z0-9_]{16,}/g, "[REDACTED]");
 }
 
 /**
@@ -357,9 +366,11 @@ function readRecentCommits(cwd: string, maxCommits: number): string[] | null {
  */
 function readFolderStructure(cwd: string, maxDepth: number, maxEntriesPerDir: number): string[] {
 	const structure: string[] = [];
+	const maxTotalEntries = 200;
 
 	function traverse(dir: string, depth: number, prefix: string): void {
 		if (depth > maxDepth) return;
+		if (structure.length >= maxTotalEntries) return;
 
 		let entries: string[];
 		try {
@@ -378,6 +389,7 @@ function readFolderStructure(cwd: string, maxDepth: number, maxEntriesPerDir: nu
 		const omitted = filtered.length - limited.length;
 
 		for (const entry of limited) {
+			if (structure.length >= maxTotalEntries) return;
 			const entryPath = join(dir, entry);
 			let isDir = false;
 			try {
@@ -394,7 +406,7 @@ function readFolderStructure(cwd: string, maxDepth: number, maxEntriesPerDir: nu
 			}
 		}
 
-		if (omitted > 0) {
+		if (omitted > 0 && structure.length < maxTotalEntries) {
 			structure.push(`${prefix}... (${omitted} more)`);
 		}
 	}
