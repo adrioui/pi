@@ -46,6 +46,9 @@ const LEADER_ONLY_TOOLS = new Set([
 
 export function filterToolsForRole(role: string, allTools: WorkerTool[]): WorkerTool[] {
 	const def = (ROLE_DEFINITIONS as Record<string, { toolkit: string }>)[role];
+	if (!def) {
+		console.warn(`Unknown role: ${role}, returning all tools`);
+	}
 	const toolkit = def?.toolkit ?? "workerBase";
 
 	const allowedSet = toolkit === "criticBase" ? CRITIC_BASE_TOOLS : WORKER_BASE_TOOLS;

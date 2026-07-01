@@ -2,7 +2,7 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { DetachedProcessRegistry } from "../../../src/core/detached-process-registry.ts";
 import { IdenticalContinueTracker } from "../../../src/core/identical-continue-tracker.ts";
-import { buildWorkerContext, truncateTranscript } from "../../../src/core/worker-context-builder.ts";
+import { buildWorkerContext } from "../../../src/core/worker-context-builder.ts";
 import { WorkerSession, type WorkerTool } from "../../../src/core/worker-session.ts";
 import { filterToolsForRole } from "../../../src/core/worker-tools.ts";
 
@@ -140,12 +140,6 @@ describe("buildWorkerContext", () => {
 		expect(context).toContain("<transcript>");
 		expect(context).toContain("Previous messages");
 		expect(context).toContain("</transcript>");
-	});
-
-	it("truncateTranscript limits messages", () => {
-		const transcript = "msg1\n\nmsg2\n\nmsg3\n\nmsg4\n\nmsg5";
-		const truncated = truncateTranscript(transcript, 2);
-		expect(truncated).toBe("msg4\n\nmsg5");
 	});
 });
 

@@ -182,12 +182,29 @@ export function sanitizeBinaryOutput(str: string): string {
  */
 const trackedDetachedChildPids = new Set<number>();
 
+// Lazy import to avoid circular dependency — loaded on first use
+let _registerDetached: ((pid: number, outputPath?: string) => void) | undefined;
+let _unregisterDetached: ((pid: number) => void) | undefined;
+
+async function ensureExecutorHooks(): Promise<void> {
+	if (_registerDetached !== undefined) return;
+	try {
+		const mod = await import("../core/worker-executor.ts");
+		_registerDetached = mod.registerDetachedProcessWithExecutor;
+		_unregisterDetached = mod.unregisterDetachedProcessFromExecutor;
+	} catch {
+		// Worker executor not available (e.g. multi-agent disabled)
+	}
+}
+
 export function trackDetachedChildPid(pid: number): void {
 	trackedDetachedChildPids.add(pid);
+	void ensureExecutorHooks().then(() => _registerDetached?.(pid));
 }
 
 export function untrackDetachedChildPid(pid: number): void {
 	trackedDetachedChildPids.delete(pid);
+	void ensureExecutorHooks().then(() => _unregisterDetached?.(pid));
 }
 
 export function killTrackedDetachedChildren(): void {

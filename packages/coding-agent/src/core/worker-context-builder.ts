@@ -22,12 +22,3 @@ export function buildWorkerContext(input: WorkerContextInput): string {
 		transcript: input.transcript ?? "",
 	});
 }
-
-/**
- * Truncate a transcript to the last N messages for worker context.
- */
-export function truncateTranscript(transcript: string, maxMessages = 10): string {
-	const messages = transcript.split("\n\n").filter(Boolean);
-	if (messages.length <= maxMessages) return transcript;
-	return messages.slice(-maxMessages).join("\n\n");
-}
