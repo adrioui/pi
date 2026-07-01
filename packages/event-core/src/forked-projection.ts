@@ -85,6 +85,10 @@ export class ForkedProjectionStore<TEvent extends EventEnvelope = EventEnvelope>
 		};
 	}
 
+	removeFork(forkId: string): void {
+		this.forkStores.delete(forkId);
+	}
+
 	get<TState>(name: string): TState | undefined {
 		return this.globalStore.get<TState>(name);
 	}

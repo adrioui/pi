@@ -5,14 +5,23 @@ import type {
 	EventSink,
 	EventStore,
 	ProjectionDefinition,
+	ProjectionSnapshot,
 	ProjectionView,
 	RoleDefinition,
+	Signal,
 } from "./types.ts";
+
+interface WritableProjectionStore<TEvent extends EventEnvelope = EventEnvelope> extends ProjectionView<TEvent> {
+	register<TState>(definition: ProjectionDefinition<TEvent, TState>): void;
+	apply(event: TEvent): Signal[];
+	replay(events: readonly TEvent[]): void;
+	snapshots(): ProjectionSnapshot[];
+}
 
 export interface DefaultEventSinkOptions<TEvent extends EventEnvelope = EventEnvelope> {
 	onEventApplied?: (event: TEvent) => void;
 	/** Optional projection store override. If not provided, a default ProjectionStore is created. */
-	projectionStore?: ProjectionStore<TEvent>;
+	projectionStore?: WritableProjectionStore<TEvent>;
 }
 
 /**
@@ -29,12 +38,13 @@ export interface DefaultEventSinkOptions<TEvent extends EventEnvelope = EventEnv
  */
 export class DefaultEventSink<TEvent extends EventEnvelope = EventEnvelope> implements EventSink<TEvent> {
 	private readonly store: EventStore<TEvent>;
-	private readonly _projections: ProjectionStore<TEvent>;
+	private readonly _projections: WritableProjectionStore<TEvent>;
 	private readonly roleHost: RoleHost<TEvent>;
 	private readonly signalBus: InMemorySignalBus;
 	private readonly onEventApplied?: (event: TEvent) => void;
 	private readonly controller = new AbortController();
 	private sequence = 0;
+	private publishChain: Promise<void> = Promise.resolve();
 
 	constructor(store: EventStore<TEvent>, options: DefaultEventSinkOptions<TEvent> = {}) {
 		this.store = store;
@@ -52,20 +62,24 @@ export class DefaultEventSink<TEvent extends EventEnvelope = EventEnvelope> impl
 	}
 
 	async publish(event: TEvent): Promise<void> {
-		if (this.controller.signal.aborted) return;
-		const appliedEvent =
-			event.sequence > this.sequence ? event : ({ ...event, sequence: this.sequence + 1 } as TEvent);
+		const publishTask = this.publishChain.then(async () => {
+			if (this.controller.signal.aborted) return;
+			const appliedEvent =
+				event.sequence > this.sequence ? event : ({ ...event, sequence: this.sequence + 1 } as TEvent);
 
-		// Phase 1: Persist + apply projections (synchronous)
-		await this.store.append(appliedEvent);
-		this.sequence = Math.max(this.sequence, appliedEvent.sequence);
-		const signals = this._projections.apply(appliedEvent);
-		this.onEventApplied?.(appliedEvent);
+			// Phase 1: Persist + apply projections (synchronous)
+			await this.store.append(appliedEvent);
+			this.sequence = Math.max(this.sequence, appliedEvent.sequence);
+			const signals = this._projections.apply(appliedEvent);
+			this.onEventApplied?.(appliedEvent);
 
-		// Phase 2: Run roles asynchronously
-		void this.roleHost.handle(appliedEvent, signals).catch(() => {
-			// Role errors are non-fatal; they don't break the event pipeline
+			// Phase 2: Run roles asynchronously
+			void this.roleHost.handle(appliedEvent, signals).catch(() => {
+				// Role errors are non-fatal; they don't break the event pipeline
+			});
 		});
+		this.publishChain = publishTask.catch(() => {});
+		await publishTask;
 	}
 
 	replay(events: readonly TEvent[]): void {

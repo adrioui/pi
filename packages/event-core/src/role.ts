@@ -1,8 +1,7 @@
-import type { ProjectionStore } from "./projection.ts";
-import type { EventEnvelope, RoleContext, RoleDefinition, Signal, SignalBus } from "./types.ts";
+import type { EventEnvelope, ProjectionView, RoleContext, RoleDefinition, Signal, SignalBus } from "./types.ts";
 
 export interface RoleHostOptions<TEvent extends EventEnvelope = EventEnvelope> {
-	projections: ProjectionStore<TEvent>;
+	projections: ProjectionView<TEvent>;
 	publish: (event: TEvent) => Promise<void>;
 	/** Optional signal bus for inter-role communication. */
 	signals?: SignalBus;
@@ -22,7 +21,7 @@ export class RoleHost<TEvent extends EventEnvelope = EventEnvelope> {
 	private readonly roles: RoleDefinition<TEvent>[] = [];
 	private readonly inflightByKey = new Map<string, Promise<void>>();
 	private readonly matching = new Set<Promise<void>>();
-	private readonly projections: ProjectionStore<TEvent>;
+	private readonly projections: ProjectionView<TEvent>;
 	private readonly publishEvent: (event: TEvent) => Promise<void>;
 	private readonly signalBus: SignalBus;
 	private readonly signal: AbortSignal;
