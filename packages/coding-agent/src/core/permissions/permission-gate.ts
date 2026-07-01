@@ -194,8 +194,11 @@ const BUILT_IN_RULES: PermissionRule[] = [
 	{ tool: "find", action: "allow" },
 	{ tool: "ls", action: "allow" },
 	{ tool: "web_search", action: "allow" },
-	{ tool: "fetch_content", action: "allow" },
+	{ tool: "web_fetch", action: "allow" },
 	{ tool: "code_search", action: "allow" },
+	{ tool: "scratchpad_load", action: "allow" },
+	{ tool: "scratchpad_save", action: "allow" },
+	{ tool: "compact", action: "allow" },
 
 	// Deny destructive git operations in bash
 	{
@@ -294,10 +297,9 @@ export function evaluatePermission(
 		}
 	}
 
-	// Known/registered tools are allowed by default in interactive contexts when
-	// no explicit rule matched. In non-interactive (headless/execute) contexts,
-	// registered tools without an explicit allow rule are denied — the documented
-	// policy requires allow rules for all mutating tools in headless mode.
+	// Known/registered tools are allowed by default when no explicit rule matched.
+	// Non-interactive (headless/execute) contexts still deny unknown tools via the
+	// default deny below — known tools are always allowed regardless of context.
 	const knownTools = options.knownTools ?? [];
 	if (knownTools.includes(toolName)) {
 		return {

@@ -1,7 +1,7 @@
 /**
  * Worker tool registry scoping — filters tools based on ROLE_DEFINITIONS toolkit field.
  *
- * - workerBase: read, bash, edit, write, grep, find, ls, web_search, web_fetch, skill, compact, scratchpad-save, scratchpad-load
+ * - workerBase: read, bash, edit, write, grep, find, ls, web_search, web_fetch, skill, compact, scratchpad_save, scratchpad_load
  * - criticBase: read, grep, find, ls, bash (read-only)
  * - Leader-only tools (spawnWorker, killWorker, etc.) are NOT available to any worker
  */
@@ -21,12 +21,14 @@ const WORKER_BASE_TOOLS = new Set([
 	"web_fetch",
 	"skill",
 	"compact",
-	"scratchpad-save",
-	"scratchpad-load",
+	"scratchpad_save",
+	"scratchpad_load",
 ]);
 
 const CRITIC_BASE_TOOLS = new Set(["read", "grep", "find", "ls", "bash"]);
 
+// `checkpoint_changes` and `restore_snapshot` are also absent from WORKER_BASE_TOOLS.
+// Keeping them here is defense-in-depth if the worker allowlist changes later.
 const LEADER_ONLY_TOOLS = new Set([
 	"spawnWorker",
 	"killWorker",
@@ -38,8 +40,8 @@ const LEADER_ONLY_TOOLS = new Set([
 	"finishGoal",
 	"pass",
 	"escalate",
-	"checkpoint-changes",
-	"restore-snapshot",
+	"checkpoint_changes",
+	"restore_snapshot",
 ]);
 
 export function filterToolsForRole(role: string, allTools: WorkerTool[]): WorkerTool[] {

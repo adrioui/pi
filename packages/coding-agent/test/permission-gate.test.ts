@@ -57,6 +57,16 @@ describe("permission-gate", () => {
 			expect(decision.reason).toContain("git reset --hard");
 		});
 
+		it("lets explicit user allow rules override hard shell denies", () => {
+			const decision = evaluatePermission(
+				"bash",
+				{ command: "git reset --hard HEAD" },
+				{ userRules: [{ tool: "bash", action: "allow" }], interactive: false },
+			);
+			expect(decision.permitted).toBe(true);
+			expect(decision.source).toBe("user");
+		});
+
 		it("allows shell piping by default", () => {
 			const decision = evaluatePermission(
 				"bash",
@@ -113,6 +123,16 @@ describe("permission-gate", () => {
 			expect(evaluatePermission("write", { path: "foo.ts" }, { interactive: false }).permitted).toBe(true);
 			expect(evaluatePermission("edit", { path: "foo.ts" }, { interactive: false }).permitted).toBe(true);
 			expect(evaluatePermission("edit-diff", { path: "foo.ts" }, { interactive: false }).permitted).toBe(true);
+		});
+
+		it("denies unregistered tools by default in non-interactive contexts", () => {
+			const decision = evaluatePermission("custom_tool", {}, { interactive: false, knownTools: ["read", "bash"] });
+			expect(decision.permitted).toBe(false);
+		});
+
+		it("allows registered tools in non-interactive contexts", () => {
+			const decision = evaluatePermission("custom_tool", {}, { interactive: false, knownTools: ["custom_tool"] });
+			expect(decision.permitted).toBe(true);
 		});
 
 		it("respects context filter", () => {

@@ -13,7 +13,7 @@ export const WORKER_BASE_PROMPT = [
 	"",
 	"## Context awareness",
 	"You do not see the full session context. Work only with what is in your delegation message.",
-	"Use scratchpad-save to persist findings for later retrieval. Use scratchpad-load to retrieve saved artifacts.",
+	"Use scratchpad_save to persist findings for later retrieval. Use scratchpad_load to retrieve saved artifacts.",
 	"",
 	"## Return format",
 	"Summarize your findings concisely. Include file paths, key observations, and verification results.",
