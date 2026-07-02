@@ -5,7 +5,10 @@
  *
  * Validation rules:
  * - Don't fail on missing required fields (stream is incomplete)
- * - DO fail on wrong-type fields (string where number expected)
+ * - DO fail on uncoercible wrong-type fields
+ * - Allow primitive string values that final TypeBox validation can safely coerce
+ *   (for example "10" for number fields). Streaming validation is an early
+ *   guardrail, not a stricter contract than final tool argument validation.
  * - DO fail on enum violations (value not in allowed set)
  *
  * Typebox optionality is represented by the parent object's `required` array,
@@ -141,6 +144,26 @@ export function typeboxToStreamingSchema(
 	};
 }
 
+export function allowUnknownFieldsForStreaming(schema: StreamingSchemaField): StreamingSchemaField {
+	const copy: StreamingSchemaField = {
+		...schema,
+		children: schema.children?.map(allowUnknownFieldsForStreaming),
+		itemSchema: schema.itemSchema ? allowUnknownFieldsForStreaming(schema.itemSchema) : undefined,
+		tupleItems: schema.tupleItems?.map(allowUnknownFieldsForStreaming),
+		additionalProperties: schema.additionalProperties
+			? allowUnknownFieldsForStreaming(schema.additionalProperties)
+			: undefined,
+	};
+	if (copy.type === "object" && copy.children) {
+		copy.additionalProperties ??= {
+			name: "*",
+			type: "any",
+			required: false,
+		};
+	}
+	return copy;
+}
+
 function normalizeSchemaType(type: string | string[] | undefined): StreamingSchemaField["type"] {
 	if (Array.isArray(type)) return "union";
 	if (type === "integer") return "number";
@@ -260,7 +283,10 @@ export function validatePartialAgainstSchema(
 
 	if (schema.enumValues) {
 		const value = String(partial);
-		if (!schema.enumValues.includes(value)) {
+		const matchesCompleteValue = schema.enumValues.includes(value);
+		const matchesStreamingPrefix =
+			typeof partial === "string" && schema.enumValues.some((enumValue) => enumValue.startsWith(value));
+		if (!matchesCompleteValue && !matchesStreamingPrefix) {
 			return {
 				valid: false,
 				issue: `Field "${path}" must be one of: ${schema.enumValues.join(", ")}`,
@@ -273,14 +299,27 @@ export function validatePartialAgainstSchema(
 	if (schema.type === "string" && typeof partial !== "string") {
 		return { valid: false, issue: `Field "${path}" expected type string, got ${typeof partial}`, fieldPath: path };
 	}
-	if (schema.type === "number" && typeof partial !== "number") {
+	if (schema.type === "number" && typeof partial !== "number" && !isCoercibleNumber(partial)) {
 		return { valid: false, issue: `Field "${path}" expected type number, got ${typeof partial}`, fieldPath: path };
 	}
-	if (schema.type === "boolean" && typeof partial !== "boolean") {
+	if (schema.type === "boolean" && typeof partial !== "boolean" && !isCoercibleBoolean(partial)) {
 		return { valid: false, issue: `Field "${path}" expected type boolean, got ${typeof partial}`, fieldPath: path };
 	}
 
 	return { valid: true };
+}
+
+function isCoercibleNumber(value: unknown): boolean {
+	if (typeof value !== "string") return false;
+	const trimmed = value.trim();
+	if (trimmed === "") return false;
+	return Number.isFinite(Number(trimmed));
+}
+
+function isCoercibleBoolean(value: unknown): boolean {
+	if (typeof value !== "string") return false;
+	const trimmed = value.trim().toLowerCase();
+	return trimmed === "true" || trimmed === "false";
 }
 
 function mergeObjectSchemas(schemas: readonly TSchema[]): TSchema {

@@ -16,6 +16,7 @@ export {
 } from "./streaming-field-parser.ts";
 export { JsonTokenizer, type Token, type TokenType } from "./tokenizer.ts";
 export {
+	allowUnknownFieldsForStreaming,
 	type StreamingSchemaField,
 	typeboxToStreamingSchema,
 	type ValidationState,

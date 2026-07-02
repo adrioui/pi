@@ -21,6 +21,7 @@ export function createStructuredOutputInjector(toolSchemas: TSchema[]): PayloadH
 
 		if (payload && typeof payload === "object") {
 			const p = payload as Record<string, unknown>;
+			if (hasNativeToolDeclarations(p)) return payload;
 
 			if (model.api === "openai-completions") {
 				p.response_format = { type: "json_object" };
@@ -42,4 +43,10 @@ export function createStructuredOutputInjector(toolSchemas: TSchema[]): PayloadH
 		}
 		return payload;
 	};
+}
+
+function hasNativeToolDeclarations(payload: Record<string, unknown>): boolean {
+	const tools = payload.tools;
+	if (Array.isArray(tools) && tools.length > 0) return true;
+	return false;
 }

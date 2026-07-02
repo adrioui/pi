@@ -1,7 +1,8 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { typeboxToGbnf } from "../src/grammar/index.ts";
+import { createStructuredOutputInjector, typeboxToGbnf } from "../src/grammar/index.ts";
 import {
+	allowUnknownFieldsForStreaming,
 	StreamingFieldParser,
 	typeboxToStreamingSchema,
 	validatePartialAgainstSchema,
@@ -54,11 +55,18 @@ describe("StreamingFieldParser", () => {
 		expect(parser.partial).toEqual({ name: "test" });
 	});
 
-	it("validates against schema - wrong type fails", () => {
+	it("validates against schema - uncoercible wrong type fails", () => {
 		const schema = typeboxToStreamingSchema(Type.Object({ name: Type.String(), count: Type.Number() }));
 		const result = validatePartialAgainstSchema({ count: "not a number" }, schema);
 		expect(result.valid).toBe(false);
 		expect(result.issue).toContain("expected type number");
+	});
+
+	it("accepts primitive strings that final TypeBox validation can coerce", () => {
+		const schema = typeboxToStreamingSchema(
+			Type.Object({ offset: Type.Number(), limit: Type.Integer(), recursive: Type.Boolean() }),
+		);
+		expect(validatePartialAgainstSchema({ offset: "10", limit: "25", recursive: "false" }, schema).valid).toBe(true);
 	});
 
 	it("validates against schema - missing required passes (stream incomplete)", () => {
@@ -76,24 +84,33 @@ describe("StreamingFieldParser", () => {
 		expect(result.issue).toContain("must be one of");
 	});
 
+	it("accepts streaming enum prefixes until the final value is complete", () => {
+		const schema = typeboxToStreamingSchema(
+			Type.Object({ role: Type.Union([Type.Literal("scout"), Type.Literal("architect")]) }),
+		);
+		expect(validatePartialAgainstSchema({ role: "" }, schema).valid).toBe(true);
+		expect(validatePartialAgainstSchema({ role: "sco" }, schema).valid).toBe(true);
+		expect(validatePartialAgainstSchema({ role: "scout" }, schema).valid).toBe(true);
+		expect(validatePartialAgainstSchema({ role: "engineer" }, schema).valid).toBe(false);
+	});
+
 	it("marks Type.Optional fields as optional from parent required metadata", () => {
 		const schema = typeboxToStreamingSchema(Type.Object({ name: Type.String(), note: Type.Optional(Type.String()) }));
 		const note = schema.children?.find((child) => child.name === "note");
 		expect(note?.required).toBe(false);
 	});
 
-	it("validates Type.Integer fields as numbers", () => {
+	it("validates Type.Integer fields as numbers or numeric strings", () => {
 		const schema = typeboxToStreamingSchema(Type.Object({ count: Type.Integer() }));
-		const result = validatePartialAgainstSchema({ count: "1" }, schema);
-		expect(result.valid).toBe(false);
-		expect(result.issue).toContain("expected type number");
+		expect(validatePartialAgainstSchema({ count: 1 }, schema).valid).toBe(true);
+		expect(validatePartialAgainstSchema({ count: "1" }, schema).valid).toBe(true);
 	});
 
 	it("validates Type.Tuple fields positionally", () => {
 		const schema = typeboxToStreamingSchema(Type.Object({ pair: Type.Tuple([Type.String(), Type.Number()]) }));
 		expect(validatePartialAgainstSchema({ pair: ["name", 1] }, schema).valid).toBe(true);
 
-		const wrongType = validatePartialAgainstSchema({ pair: ["name", "1"] }, schema);
+		const wrongType = validatePartialAgainstSchema({ pair: ["name", "one"] }, schema);
 		expect(wrongType.valid).toBe(false);
 		expect(wrongType.fieldPath).toBe("pair[1]");
 
@@ -104,9 +121,23 @@ describe("StreamingFieldParser", () => {
 
 	it("includes field path for nested validation errors", () => {
 		const schema = typeboxToStreamingSchema(Type.Object({ config: Type.Object({ count: Type.Number() }) }));
-		const result = validatePartialAgainstSchema({ config: { count: "1" } }, schema);
+		const result = validatePartialAgainstSchema({ config: { count: "one" } }, schema);
 		expect(result.valid).toBe(false);
 		expect(result.fieldPath).toBe("config.count");
+	});
+
+	it("can defer unknown-field failures while still validating known field types", () => {
+		const strictSchema = typeboxToStreamingSchema(Type.Object({ path: Type.String() }));
+		const strictResult = validatePartialAgainstSchema({ path: "file.ts", unexpected: "value" }, strictSchema);
+		expect(strictResult.valid).toBe(false);
+		expect(strictResult.issue).toContain("Unknown field");
+
+		const relaxedSchema = allowUnknownFieldsForStreaming(strictSchema);
+		expect(validatePartialAgainstSchema({ path: "file.ts", unexpected: "value" }, relaxedSchema).valid).toBe(true);
+
+		const wrongKnownType = validatePartialAgainstSchema({ path: 123, unexpected: "value" }, relaxedSchema);
+		expect(wrongKnownType.valid).toBe(false);
+		expect(wrongKnownType.fieldPath).toBe("path");
 	});
 });
 
@@ -178,5 +209,28 @@ describe("typeboxToGbnf", () => {
 		const gbnf = typeboxToGbnf({ type: "constructor" } as never);
 		expect(gbnf).toContain("root ::= value");
 		expect(gbnf).toContain("value ::= string | number");
+	});
+});
+
+describe("createStructuredOutputInjector", () => {
+	it("does not combine response_format with native tool declarations", async () => {
+		const injector = createStructuredOutputInjector([Type.Object({ value: Type.String() })]);
+		const payload = {
+			tools: [{ type: "function", function: { name: "echo" } }],
+		};
+		const result = await injector(payload, {
+			id: "mock",
+			name: "mock",
+			api: "openai-completions",
+			provider: "mock",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8192,
+			maxTokens: 2048,
+		});
+		expect(result).toBe(payload);
+		expect(payload).not.toHaveProperty("response_format");
 	});
 });
