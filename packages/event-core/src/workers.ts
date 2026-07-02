@@ -19,15 +19,8 @@ function createEvent(base: RuntimeEvent, type: string, payload: Record<string, u
 export function createCortexWorker<TEvent extends RuntimeEvent = RuntimeEvent>(): RoleDefinition<TEvent> {
 	return {
 		name: "CortexWorker",
-		match: (event) => event.type === "user_message_ready",
-		run: async ({ event, publish }) => {
-			await publish(
-				createEvent(event, "turn_started", {
-					turnId: event.id,
-					chainId: event.sessionId ?? event.stream,
-				}) as TEvent,
-			);
-		},
+		match: () => false,
+		run: () => {},
 	};
 }
 

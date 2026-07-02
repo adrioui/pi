@@ -5,8 +5,10 @@ import {
 	createCheckpointProjection,
 	createContextUsageProjection,
 	createConversationProjection,
+	createCortexWorker,
 	createDisplayWorker,
 	createFileMentionResolverWorker,
+	createForkProjection,
 	createGoalProjection,
 	createSignal,
 	createTaskGraphProjection,
@@ -202,7 +204,10 @@ describe("event-core", () => {
 	});
 
 	it("runs GoalProjection through full lifecycle", () => {
-		type GoalEvent = EventEnvelope<"goal.injected" | "goal.finished" | "goal.incomplete", { goal?: string }>;
+		type GoalEvent = EventEnvelope<
+			"goal.injected" | "goal.finished" | "goal.incomplete",
+			{ goal?: string; evidence?: string; verdict?: string; source?: string }
+		>;
 		const projections = new ProjectionStore<GoalEvent>();
 		projections.register(createGoalProjection<GoalEvent>());
 
@@ -216,8 +221,24 @@ describe("event-core", () => {
 		});
 		expect(projections.get<{ goal: string | null; status: string }>("Goal")?.status).toBe("started");
 
-		projections.apply({ id: "2", stream: "s", sequence: 2, type: "goal.finished", timestamp: "t", payload: {} });
-		expect(projections.get<{ goal: string | null; status: string }>("Goal")?.status).toBe("finished");
+		projections.apply({
+			id: "2",
+			stream: "s",
+			sequence: 2,
+			type: "goal.finished",
+			timestamp: "t",
+			payload: { evidence: "tests passed", verdict: "done", source: "critic" },
+		});
+		expect(
+			projections.get<{ goal: string | null; status: string; evidence?: string; verdict?: string; source?: string }>(
+				"Goal",
+			),
+		).toMatchObject({
+			status: "finished",
+			evidence: "tests passed",
+			verdict: "done",
+			source: "critic",
+		});
 	});
 
 	it("turn outcomes do not derive goal lifecycle events without verifier payloads", async () => {
@@ -363,6 +384,29 @@ describe("event-core", () => {
 		expect(conversation.messages).toHaveLength(1);
 		expect(conversation.messages[0]).toMatchObject({ role: "user", text: "Read @README.md" });
 		sink.dispose();
+	});
+
+	it("CortexWorker does not publish duplicate turn_started events", async () => {
+		const store = new InMemoryEventStore<RuntimeEvent>();
+		const sink = new DefaultEventSink<RuntimeEvent>(store);
+		sink.registerRole(createCortexWorker<RuntimeEvent>());
+
+		await sink.publish(runtimeEvent(1, "user_message_ready", { role: "user", text: "hello" }));
+		await sink.waitForIdle();
+
+		expect(store.list().map((current) => current.type)).toEqual(["user_message_ready"]);
+		sink.dispose();
+	});
+
+	it("Fork projection evicts entries on fork_cleaned", () => {
+		const projections = new ProjectionStore<RuntimeEvent>();
+		projections.register(createForkProjection<RuntimeEvent>());
+
+		projections.apply(runtimeEvent(1, "agent_created", { forkId: "fork-1", agentId: "agent-1" }));
+		expect(projections.get<{ forks: Map<string, Record<string, unknown>> }>("Fork")?.forks.has("fork-1")).toBe(true);
+
+		projections.apply(runtimeEvent(2, "fork_cleaned", { forkId: "fork-1", agentId: "agent-1" }));
+		expect(projections.get<{ forks: Map<string, Record<string, unknown>> }>("Fork")?.forks.has("fork-1")).toBe(false);
 	});
 
 	it("generates chat titles only for explicit first-turn outcomes", async () => {

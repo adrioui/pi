@@ -333,8 +333,15 @@ export function createForkProjection<TEvent extends EventEnvelope = EventEnvelop
 		signals: [ForkSignals.created],
 		initialState: (): ForkState => ({ forks: new Map(), parentForkId: null }),
 		reduce: (state, event) => {
-			if (event.type !== "agent_created") return state;
 			const p = payload(event);
+			if (event.type === "fork_cleaned") {
+				const forkId = str(p.forkId, str(p.agentId));
+				if (!forkId || !state.forks.has(forkId)) return state;
+				const forks = new Map(state.forks);
+				forks.delete(forkId);
+				return { ...state, forks };
+			}
+			if (event.type !== "agent_created") return state;
 			const forkId = str(p.forkId, str(p.agentId));
 			const forks = new Map(state.forks);
 			if (forkId) forks.set(forkId, p);

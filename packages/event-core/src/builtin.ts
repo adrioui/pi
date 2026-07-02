@@ -7,6 +7,9 @@ export type GoalStatus = "idle" | "started" | "finished" | "incomplete";
 export interface GoalState {
 	goal: string | null;
 	status: GoalStatus;
+	evidence?: string;
+	verdict?: string;
+	source?: string;
 }
 
 export const GoalSignals = {
@@ -39,10 +42,26 @@ export function createGoalProjection<TEvent extends EventEnvelope = EventEnvelop
 			switch (event.type) {
 				case "goal.injected":
 					return { goal: String((event.payload as Record<string, unknown>).goal ?? ""), status: "started" };
-				case "goal.finished":
-					return { ...state, status: "finished" };
-				case "goal.incomplete":
-					return { ...state, status: "incomplete" };
+				case "goal.finished": {
+					const payload = event.payload as Record<string, unknown>;
+					return {
+						...state,
+						status: "finished",
+						evidence: payload.evidence === undefined ? state.evidence : String(payload.evidence),
+						verdict: payload.verdict === undefined ? state.verdict : String(payload.verdict),
+						source: payload.source === undefined ? state.source : String(payload.source),
+					};
+				}
+				case "goal.incomplete": {
+					const payload = event.payload as Record<string, unknown>;
+					return {
+						...state,
+						status: "incomplete",
+						evidence: payload.evidence === undefined ? state.evidence : String(payload.evidence),
+						verdict: payload.verdict === undefined ? state.verdict : String(payload.verdict),
+						source: payload.source === undefined ? state.source : String(payload.source),
+					};
+				}
 				default:
 					return state;
 			}
