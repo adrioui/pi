@@ -8,7 +8,7 @@ import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 const tempDirs: string[] = [];
 
 async function createTempDir(): Promise<string> {
-	const dir = await mkdtemp(join(tmpdir(), "pi-edit-legacy-input-"));
+	const dir = await mkdtemp(join(tmpdir(), "pi-edit-top-level-input-"));
 	tempDirs.push(dir);
 	return dir;
 }
@@ -17,39 +17,42 @@ afterEach(async () => {
 	await Promise.all(tempDirs.splice(0, tempDirs.length).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-describe("edit tool prepareArguments", () => {
-	it("keeps legacy fields out of the public schema", () => {
+describe("edit tool top-level input preparation", () => {
+	it("schema has old/new as top-level fields and in replaceEditSchema", () => {
 		const definition = createEditToolDefinition(process.cwd());
+		expect(definition.parameters.properties).toHaveProperty("old");
+		expect(definition.parameters.properties).toHaveProperty("new");
+		expect(definition.parameters.properties).toHaveProperty("edits");
 		expect(definition.parameters.properties).not.toHaveProperty("oldText");
 		expect(definition.parameters.properties).not.toHaveProperty("newText");
 	});
 
-	it("folds top-level oldText/newText into edits", () => {
+	it("folds top-level old/new into edits", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const prepared = definition.prepareArguments!({
 			path: "file.txt",
-			oldText: "before",
-			newText: "after",
+			old: "before",
+			new: "after",
 		});
 		expect(prepared).toEqual({
 			path: "file.txt",
-			edits: [{ oldText: "before", newText: "after" }],
+			edits: [{ old: "before", new: "after" }],
 		});
 	});
 
-	it("appends legacy replacement to existing edits", () => {
+	it("appends top-level replacement to existing edits", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const prepared = definition.prepareArguments!({
 			path: "file.txt",
-			edits: [{ oldText: "a", newText: "b" }],
-			oldText: "c",
-			newText: "d",
+			edits: [{ old: "a", new: "b" }],
+			old: "c",
+			new: "d",
 		});
 		expect(prepared).toEqual({
 			path: "file.txt",
 			edits: [
-				{ oldText: "a", newText: "b" },
-				{ oldText: "c", newText: "d" },
+				{ old: "a", new: "b" },
+				{ old: "c", new: "d" },
 			],
 		});
 	});
@@ -58,10 +61,10 @@ describe("edit tool prepareArguments", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const input = {
 			path: "file.txt",
-			edits: [{ oldText: "a", newText: "b" }],
+			edits: [{ old: "a", new: "b" }],
 		};
 		const prepared = definition.prepareArguments!(input);
-		expect(prepared).toBe(input);
+		expect(prepared).toEqual(input);
 	});
 
 	it("passes through non-object input unchanged", () => {
@@ -73,18 +76,18 @@ describe("edit tool prepareArguments", () => {
 
 	it("prepared args execute correctly", async () => {
 		const dir = await createTempDir();
-		const filePath = join(dir, "legacy.txt");
+		const filePath = join(dir, "top-level.txt");
 		await writeFile(filePath, "before\n", "utf8");
 
 		const definition = createEditToolDefinition(dir);
 		const prepared = definition.prepareArguments!({
-			path: "legacy.txt",
-			oldText: "before",
-			newText: "after",
+			path: "top-level.txt",
+			old: "before",
+			new: "after",
 		});
 
 		const result = await definition.execute("tool-1", prepared, undefined, undefined, {} as ExtensionContext);
-		expect(result.content).toEqual([{ type: "text", text: "Successfully replaced 1 block(s) in legacy.txt." }]);
+		expect(result.content).toEqual([{ type: "text", text: "Successfully replaced 1 block(s) in top-level.txt." }]);
 		expect(await readFile(filePath, "utf8")).toBe("after\n");
 	});
 });
@@ -94,11 +97,11 @@ describe("edit tool stringified edits", () => {
 		const definition = createEditToolDefinition(process.cwd());
 		const prepared = definition.prepareArguments!({
 			path: "file.txt",
-			edits: JSON.stringify([{ oldText: "a", newText: "b" }]),
+			edits: JSON.stringify([{ old: "a", new: "b" }]),
 		});
 		expect(prepared).toEqual({
 			path: "file.txt",
-			edits: [{ oldText: "a", newText: "b" }],
+			edits: [{ old: "a", new: "b" }],
 		});
 	});
 

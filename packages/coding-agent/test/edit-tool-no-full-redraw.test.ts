@@ -60,8 +60,8 @@ async function waitForRenderedText(
 function createLargeEdits(lines: string[]): Edit[] {
 	const targets = [50, 150, 250, 350, 450, 550, 650, 750, 850, 950];
 	return targets.map((lineNumber) => ({
-		oldText: `${lines[lineNumber - 1]}\n${lines[lineNumber]}\n${lines[lineNumber + 1]}`,
-		newText: `${lines[lineNumber - 1]}\n${lines[lineNumber]} changed\n${lines[lineNumber + 1]}`,
+		old: `${lines[lineNumber - 1]}\n${lines[lineNumber]}\n${lines[lineNumber + 1]}`,
+		new: `${lines[lineNumber - 1]}\n${lines[lineNumber]} changed\n${lines[lineNumber + 1]}`,
 	}));
 }
 
@@ -209,7 +209,7 @@ describe("edit tool TUI rendering", () => {
 		const component = new ToolExecutionComponent(
 			"edit",
 			"tool-call-2",
-			{ path: filePath, edits: [{ oldText: "does not exist", newText: "replacement" }] },
+			{ path: filePath, edits: [{ old: "does not exist", new: "replacement" }] },
 			{},
 			createEditToolDefinition(process.cwd()),
 			tui,

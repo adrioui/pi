@@ -1760,7 +1760,7 @@ async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
   return withFileMutationQueue(absolutePath, async () => {
     await mkdir(dirname(absolutePath), { recursive: true });
     const current = await readFile(absolutePath, "utf8");
-    const next = current.replace(params.oldText, params.newText);
+    const next = current.replace(params.old, params.new);
     await writeFile(absolutePath, next, "utf8");
 
     return {
@@ -1848,7 +1848,7 @@ async execute(toolCallId, params) {
 
 **Argument preparation:** `prepareArguments(args)` is optional. If defined, it runs before schema validation and before `execute()`. Use it to mimic an older accepted input shape when pi resumes an older session whose stored tool call arguments no longer match the current schema. Return the object you want validated against `parameters`. Keep the public schema strict. Do not add deprecated compatibility fields to `parameters` just to keep old resumed sessions working.
 
-Example: an older session may contain an `edit` tool call with top-level `oldText` and `newText`, while the current schema only accepts `edits: [{ oldText, newText }]`.
+Example: a tool may expose a compact single-edit shape while its executor only wants the normalized `edits: [{ old, new }]` array.
 
 ```typescript
 pi.registerTool({
@@ -1857,10 +1857,12 @@ pi.registerTool({
   description: "Edit a single file using exact text replacement",
   parameters: Type.Object({
     path: Type.String(),
+    old: Type.Optional(Type.String()),
+    new: Type.Optional(Type.String()),
     edits: Type.Array(
       Type.Object({
-        oldText: Type.String(),
-        newText: Type.String(),
+        old: Type.String(),
+        new: Type.String(),
       }),
     ),
   }),
@@ -1869,18 +1871,18 @@ pi.registerTool({
 
     const input = args as {
       path?: string;
-      edits?: Array<{ oldText: string; newText: string }>;
-      oldText?: unknown;
-      newText?: unknown;
+      edits?: Array<{ old: string; new: string }>;
+      old?: unknown;
+      new?: unknown;
     };
 
-    if (typeof input.oldText !== "string" || typeof input.newText !== "string") {
+    if (typeof input.old !== "string" || typeof input.new !== "string") {
       return args;
     }
 
     return {
       ...input,
-      edits: [...(input.edits ?? []), { oldText: input.oldText, newText: input.newText }],
+      edits: [...(input.edits ?? []), { old: input.old, new: input.new }],
     };
   },
   async execute(toolCallId, params, signal, onUpdate, ctx) {

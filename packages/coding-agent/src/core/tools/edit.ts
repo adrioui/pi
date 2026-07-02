@@ -32,11 +32,11 @@ type EditRenderState = {
 
 const replaceEditSchema = Type.Object(
 	{
-		oldText: Type.String({
+		old: Type.String({
 			description:
-				"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
+				"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].old in the same call.",
 		}),
-		newText: Type.String({ description: "Replacement text for this targeted edit." }),
+		new: Type.String({ description: "Replacement text for this targeted edit." }),
 	},
 	{ additionalProperties: false },
 );
@@ -44,19 +44,19 @@ const replaceEditSchema = Type.Object(
 const editSchema = Type.Object(
 	{
 		path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
-		edits: Type.Array(replaceEditSchema, {
-			description:
-				"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
-		}),
+		edits: Type.Optional(
+			Type.Array(replaceEditSchema, {
+				description:
+					"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+			}),
+		),
+		old: Type.Optional(Type.String({ description: "Single edit: exact text to find." })),
+		new: Type.Optional(Type.String({ description: "Single edit: replacement text." })),
 	},
 	{ additionalProperties: false },
 );
 
 export type EditToolInput = Static<typeof editSchema>;
-type LegacyEditToolInput = EditToolInput & {
-	oldText?: unknown;
-	newText?: unknown;
-};
 
 export interface EditToolDetails {
 	/** Display-oriented diff of the changes made */
@@ -96,7 +96,7 @@ function prepareEditArguments(input: unknown): EditToolInput {
 		return input as EditToolInput;
 	}
 
-	const args = input as Record<string, unknown>;
+	const args = { ...(input as Record<string, unknown>) };
 
 	// Some models (Opus 4.6, GLM-5.1) send edits as a JSON string instead of an array
 	if (typeof args.edits === "string") {
@@ -106,30 +106,41 @@ function prepareEditArguments(input: unknown): EditToolInput {
 		} catch {}
 	}
 
-	const legacy = args as LegacyEditToolInput;
-	if (typeof legacy.oldText !== "string" || typeof legacy.newText !== "string") {
-		return args as EditToolInput;
+	// Fold top-level old/new (single-edit form) into edits[]
+	if (typeof args.old === "string" && typeof args.new === "string") {
+		const edits = Array.isArray(args.edits) ? [...(args.edits as unknown[])] : [];
+		edits.push({ old: args.old, new: args.new });
+		args.edits = edits;
 	}
+	delete args.old;
+	delete args.new;
 
-	const edits = Array.isArray(legacy.edits) ? [...legacy.edits] : [];
-	edits.push({ oldText: legacy.oldText, newText: legacy.newText });
-	const { oldText: _oldText, newText: _newText, ...rest } = legacy;
-	return { ...rest, edits } as EditToolInput;
+	return args as EditToolInput;
 }
 
 function validateEditInput(input: EditToolInput): { path: string; edits: Edit[] } {
 	if (!Array.isArray(input.edits) || input.edits.length === 0) {
 		throw new Error("Edit tool input is invalid. edits must contain at least one replacement.");
 	}
-	return { path: input.path, edits: input.edits };
+	const edits: Edit[] = input.edits.map((entry) => {
+		const e = entry as Record<string, unknown>;
+		const old = typeof e.old === "string" ? e.old : undefined;
+		const new_ = typeof e.new === "string" ? e.new : undefined;
+		if (typeof old !== "string" || typeof new_ !== "string") {
+			throw new Error("Each edit must have old and new fields.");
+		}
+		return { old, new: new_ };
+	});
+	return { path: input.path, edits };
 }
+
+type RenderableEditEntry = { old?: string; new?: string };
 
 type RenderableEditArgs = {
 	path?: string;
-	file_path?: string;
-	edits?: Edit[];
-	oldText?: string;
-	newText?: string;
+	edits?: RenderableEditEntry[];
+	old?: string;
+	new?: string;
 };
 
 type EditToolResultLike = {
@@ -172,7 +183,7 @@ function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path
 		return null;
 	}
 
-	const path = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : null;
+	const path = typeof args.path === "string" ? args.path : null;
 	if (!path) {
 		return null;
 	}
@@ -180,20 +191,23 @@ function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path
 	if (
 		Array.isArray(args.edits) &&
 		args.edits.length > 0 &&
-		args.edits.every((edit) => typeof edit?.oldText === "string" && typeof edit?.newText === "string")
+		args.edits.every((edit) => typeof edit?.old === "string" && typeof edit?.new === "string")
 	) {
-		return { path, edits: args.edits };
+		return {
+			path,
+			edits: args.edits.map((edit) => ({ old: edit.old!, new: edit.new! })),
+		};
 	}
 
-	if (typeof args.oldText === "string" && typeof args.newText === "string") {
-		return { path, edits: [{ oldText: args.oldText, newText: args.newText }] };
+	if (typeof args.old === "string" && typeof args.new === "string") {
+		return { path, edits: [{ old: args.old, new: args.new }] };
 	}
 
 	return null;
 }
 
 function formatEditCall(args: RenderableEditArgs | undefined, theme: Theme, cwd: string): string {
-	const pathDisplay = renderToolPath(str(args?.file_path ?? args?.path), theme, cwd);
+	const pathDisplay = renderToolPath(str(args?.path), theme, cwd);
 	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
 }
 
@@ -204,7 +218,7 @@ function formatEditResult(
 	theme: Theme,
 	isError: boolean,
 ): string | undefined {
-	const rawPath = str(args?.file_path ?? args?.path);
+	const rawPath = str(args?.path);
 	const previewDiff = preview && !("error" in preview) ? preview.diff : undefined;
 	const previewError = preview && "error" in preview ? preview.error : undefined;
 	if (isError) {
@@ -293,17 +307,17 @@ export function createEditToolDefinition(
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+			"Edit a single file using exact text replacement. Every edits[].old must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
 		promptSnippet:
 			"Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
 		promptGuidelines: [
-			"Read the file (or the relevant region) before editing so oldText matches exactly.",
+			"Read the file (or the relevant region) before editing so old matches exactly.",
 			"Use edit for precise changes; use write only for new files or full rewrites.",
-			"Each edits[].oldText must match the original file exactly. Do not include leading/trailing whitespace you did not see; preserve the file's indentation and line endings.",
-			"Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions just to connect distant changes.",
+			"Each edits[].old must match the original file exactly. Do not include leading/trailing whitespace you did not see; preserve the file's indentation and line endings.",
+			"Keep edits[].old as small as possible while still being unique in the file. Do not pad with large unchanged regions just to connect distant changes.",
 			"For repeated/near-identical blocks (e.g. several list items, similar JSX nodes), include enough unique surrounding lines to disambiguate which occurrence you mean.",
 			"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls.",
-			"Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
+			"Each edits[].old is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
 			"If an edit fails, re-read the relevant region before retrying. Do not retry identical arguments blindly.",
 			"After every edit, re-read the changed region (or the full file if small) and confirm the change landed as intended.",
 		],
@@ -341,7 +355,7 @@ export function createEditToolDefinition(
 				const rawContent = buffer.toString("utf-8");
 				throwIfAborted();
 
-				// Strip BOM before matching. The model will not include an invisible BOM in oldText.
+				// Strip BOM before matching. The model will not include an invisible BOM in old.
 				const { bom, text: content } = stripBom(rawContent);
 				const originalEnding = detectLineEnding(content);
 				const normalizedContent = normalizeToLF(content);

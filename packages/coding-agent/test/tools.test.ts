@@ -233,7 +233,7 @@ describe("Coding Agent Tools", () => {
 
 			const result = await editTool.execute("test-call-5", {
 				path: testFile,
-				edits: [{ oldText: "world", newText: "testing" }],
+				edits: [{ old: "world", new: "testing" }],
 			});
 
 			expect(getTextOutput(result)).toContain("Successfully replaced");
@@ -257,7 +257,7 @@ describe("Coding Agent Tools", () => {
 			await expect(
 				editTool.execute("test-call-6", {
 					path: testFile,
-					edits: [{ oldText: "nonexistent", newText: "testing" }],
+					edits: [{ old: "nonexistent", new: "testing" }],
 				}),
 			).rejects.toThrow(/Could not find the exact text/);
 		});
@@ -268,7 +268,7 @@ describe("Coding Agent Tools", () => {
 			await expect(
 				editTool.execute("test-call-6b", {
 					path: missingFile,
-					edits: [{ oldText: "hello", newText: "world" }],
+					edits: [{ old: "hello", new: "world" }],
 				}),
 			).rejects.toThrow(`Could not edit file: ${missingFile}. Error code: ENOENT.`);
 		});
@@ -281,7 +281,7 @@ describe("Coding Agent Tools", () => {
 			await expect(
 				editTool.execute("test-call-7", {
 					path: testFile,
-					edits: [{ oldText: "foo", newText: "bar" }],
+					edits: [{ old: "foo", new: "bar" }],
 				}),
 			).rejects.toThrow(/Found 3 occurrences/);
 		});
@@ -293,8 +293,8 @@ describe("Coding Agent Tools", () => {
 			const result = await editTool.execute("test-call-8", {
 				path: testFile,
 				edits: [
-					{ oldText: "alpha\n", newText: "ALPHA\n" },
-					{ oldText: "gamma\n", newText: "GAMMA\n" },
+					{ old: "alpha\n", new: "ALPHA\n" },
+					{ old: "gamma\n", new: "GAMMA\n" },
 				],
 			});
 
@@ -312,9 +312,9 @@ describe("Coding Agent Tools", () => {
 			const result = await editTool.execute("test-call-8b", {
 				path: testFile,
 				edits: [
-					{ oldText: "line 100\n", newText: "LINE 100\n" },
-					{ oldText: "line 300\n", newText: "LINE 300\n" },
-					{ oldText: "line 500\n", newText: "LINE 500\n" },
+					{ old: "line 100\n", new: "LINE 100\n" },
+					{ old: "line 300\n", new: "LINE 300\n" },
+					{ old: "line 500\n", new: "LINE 500\n" },
 				],
 			});
 
@@ -334,8 +334,8 @@ describe("Coding Agent Tools", () => {
 			await editTool.execute("test-call-9", {
 				path: testFile,
 				edits: [
-					{ oldText: "foo\n", newText: "foo bar\n" },
-					{ oldText: "bar\n", newText: "BAR\n" },
+					{ old: "foo\n", new: "foo bar\n" },
+					{ old: "bar\n", new: "BAR\n" },
 				],
 			});
 
@@ -362,8 +362,8 @@ describe("Coding Agent Tools", () => {
 				editTool.execute("test-call-12", {
 					path: testFile,
 					edits: [
-						{ oldText: "one\ntwo\n", newText: "ONE\nTWO\n" },
-						{ oldText: "two\nthree\n", newText: "TWO\nTHREE\n" },
+						{ old: "one\ntwo\n", new: "ONE\nTWO\n" },
+						{ old: "two\nthree\n", new: "TWO\nTHREE\n" },
 					],
 				}),
 			).rejects.toThrow(/overlap/);
@@ -378,8 +378,8 @@ describe("Coding Agent Tools", () => {
 				editTool.execute("test-call-13", {
 					path: testFile,
 					edits: [
-						{ oldText: "alpha\n", newText: "ALPHA\n" },
-						{ oldText: "missing\n", newText: "MISSING\n" },
+						{ old: "alpha\n", new: "ALPHA\n" },
+						{ old: "missing\n", new: "MISSING\n" },
 					],
 				}),
 			).rejects.toThrow(/Could not find/);
@@ -395,7 +395,7 @@ describe("Coding Agent Tools", () => {
 			await expect(
 				editTool.execute("test-call-14", {
 					path: testFile,
-					edits: [{ oldText: "hello", newText: "world" }],
+					edits: [{ old: "hello", new: "world" }],
 				}),
 			).rejects.toThrow(`Could not edit file: ${testFile}. Error code: EACCES.`);
 		});
@@ -414,14 +414,14 @@ describe("Coding Agent Tools", () => {
 			await expect(
 				genericFailureTool.execute("test-call-16", {
 					path: "broken.txt",
-					edits: [{ oldText: "hello", newText: "world" }],
+					edits: [{ old: "hello", new: "world" }],
 				}),
 			).rejects.toThrow("Could not edit file: broken.txt. Error: disk offline.");
 		});
 
 		it("should include ENOENT in diff preview for missing files", async () => {
 			const missingFile = join(testDir, "missing-preview.txt");
-			const result = await computeEditsDiff(missingFile, [{ oldText: "hello", newText: "world" }], testDir);
+			const result = await computeEditsDiff(missingFile, [{ old: "hello", new: "world" }], testDir);
 
 			expect(result).toEqual({ error: `Could not edit file: ${missingFile}. Error code: ENOENT.` });
 		});
@@ -431,7 +431,7 @@ describe("Coding Agent Tools", () => {
 			writeFileSync(unreadableFile, "hello\n");
 			chmodSync(unreadableFile, 0o222);
 
-			const result = await computeEditsDiff(unreadableFile, [{ oldText: "hello", newText: "world" }], testDir);
+			const result = await computeEditsDiff(unreadableFile, [{ old: "hello", new: "world" }], testDir);
 
 			expect(result).toEqual({ error: `Could not edit file: ${unreadableFile}. Error code: EACCES.` });
 		});
@@ -874,10 +874,10 @@ describe("edit tool fuzzy matching", () => {
 		// File has trailing spaces on lines
 		writeFileSync(testFile, "line one   \nline two  \nline three\n");
 
-		// oldText without trailing whitespace should still match
+		// old without trailing whitespace should still match
 		const result = await editTool.execute("test-fuzzy-1", {
 			path: testFile,
-			edits: [{ oldText: "line one\nline two\n", newText: "replaced\n" }],
+			edits: [{ old: "line one\nline two\n", new: "replaced\n" }],
 		});
 
 		expect(getTextOutput(result)).toContain("Successfully replaced");
@@ -891,7 +891,7 @@ describe("edit tool fuzzy matching", () => {
 
 		const result = await editTool.execute("test-fuzzy-chinese", {
 			path: testFile,
-			edits: [{ oldText: "你好,世界\n你好(世界)\n", newText: "你好，pi\n你好(pi)\n" }],
+			edits: [{ old: "你好,世界\n你好(世界)\n", new: "你好，pi\n你好(pi)\n" }],
 		});
 
 		expect(getTextOutput(result)).toContain("Successfully replaced");
@@ -905,7 +905,7 @@ describe("edit tool fuzzy matching", () => {
 
 		const result = await editTool.execute("test-fuzzy-unicode", {
 			path: testFile,
-			edits: [{ oldText: "ABC123\ncafé\n", newText: "XYZ789\ncoffee\n" }],
+			edits: [{ old: "ABC123\ncafé\n", new: "XYZ789\ncoffee\n" }],
 		});
 
 		expect(getTextOutput(result)).toContain("Successfully replaced");
@@ -918,10 +918,10 @@ describe("edit tool fuzzy matching", () => {
 		// File has smart/curly single quotes (U+2018, U+2019)
 		writeFileSync(testFile, "console.log(\u2018hello\u2019);\n");
 
-		// oldText with ASCII quotes should match
+		// old with ASCII quotes should match
 		const result = await editTool.execute("test-fuzzy-2", {
 			path: testFile,
-			edits: [{ oldText: "console.log('hello');", newText: "console.log('world');" }],
+			edits: [{ old: "console.log('hello');", new: "console.log('world');" }],
 		});
 
 		expect(getTextOutput(result)).toContain("Successfully replaced");
@@ -934,10 +934,10 @@ describe("edit tool fuzzy matching", () => {
 		// File has smart/curly double quotes (U+201C, U+201D)
 		writeFileSync(testFile, "const msg = \u201CHello World\u201D;\n");
 
-		// oldText with ASCII quotes should match
+		// old with ASCII quotes should match
 		const result = await editTool.execute("test-fuzzy-3", {
 			path: testFile,
-			edits: [{ oldText: 'const msg = "Hello World";', newText: 'const msg = "Goodbye";' }],
+			edits: [{ old: 'const msg = "Hello World";', new: 'const msg = "Goodbye";' }],
 		});
 
 		expect(getTextOutput(result)).toContain("Successfully replaced");
@@ -950,10 +950,10 @@ describe("edit tool fuzzy matching", () => {
 		// File has en-dash (U+2013) and em-dash (U+2014)
 		writeFileSync(testFile, "range: 1\u20135\nbreak\u2014here\n");
 
-		// oldText with ASCII hyphens should match
+		// old with ASCII hyphens should match
 		const result = await editTool.execute("test-fuzzy-4", {
 			path: testFile,
-			edits: [{ oldText: "range: 1-5\nbreak-here", newText: "range: 10-50\nbreak--here" }],
+			edits: [{ old: "range: 1-5\nbreak-here", new: "range: 10-50\nbreak--here" }],
 		});
 
 		expect(getTextOutput(result)).toContain("Successfully replaced");
@@ -966,10 +966,10 @@ describe("edit tool fuzzy matching", () => {
 		// File has non-breaking space (U+00A0)
 		writeFileSync(testFile, "hello\u00A0world\n");
 
-		// oldText with regular space should match
+		// old with regular space should match
 		const result = await editTool.execute("test-fuzzy-5", {
 			path: testFile,
-			edits: [{ oldText: "hello world", newText: "hello universe" }],
+			edits: [{ old: "hello world", new: "hello universe" }],
 		});
 
 		expect(getTextOutput(result)).toContain("Successfully replaced");
@@ -984,7 +984,7 @@ describe("edit tool fuzzy matching", () => {
 
 		const result = await editTool.execute("test-fuzzy-6", {
 			path: testFile,
-			edits: [{ oldText: "const x = 'exact';", newText: "const x = 'changed';" }],
+			edits: [{ old: "const x = 'exact';", new: "const x = 'changed';" }],
 		});
 
 		expect(getTextOutput(result)).toContain("Successfully replaced");
@@ -999,7 +999,7 @@ describe("edit tool fuzzy matching", () => {
 		await expect(
 			editTool.execute("test-fuzzy-7", {
 				path: testFile,
-				edits: [{ oldText: "this does not exist", newText: "replacement" }],
+				edits: [{ old: "this does not exist", new: "replacement" }],
 			}),
 		).rejects.toThrow(/Could not find the exact text/);
 	});
@@ -1012,7 +1012,7 @@ describe("edit tool fuzzy matching", () => {
 		await expect(
 			editTool.execute("test-fuzzy-8", {
 				path: testFile,
-				edits: [{ oldText: "hello world", newText: "replaced" }],
+				edits: [{ old: "hello world", new: "replaced" }],
 			}),
 		).rejects.toThrow(/Found 2 occurrences/);
 	});
@@ -1024,8 +1024,8 @@ describe("edit tool fuzzy matching", () => {
 		await editTool.execute("test-fuzzy-9", {
 			path: testFile,
 			edits: [
-				{ oldText: "console.log('hello');\n", newText: "console.log('world');\n" },
-				{ oldText: "hello world\n", newText: "hello universe\n" },
+				{ old: "console.log('hello');\n", new: "console.log('world');\n" },
+				{ old: "hello world\n", new: "hello universe\n" },
 			],
 		});
 
@@ -1039,7 +1039,7 @@ describe("edit tool fuzzy matching", () => {
 
 		const result = await editTool.execute("test-fuzzy-preserve-duplicate-line", {
 			path: testFile,
-			edits: [{ oldText: "replace me\n", newText: "after\n" }],
+			edits: [{ old: "replace me\n", new: "after\n" }],
 		});
 
 		const expectedContent = ["after", "after\u0020\u0020\u0020", ""].join("\n");
@@ -1064,8 +1064,8 @@ describe("edit tool fuzzy matching", () => {
 		const result = await editTool.execute("test-fuzzy-preserve-multi", {
 			path: testFile,
 			edits: [
-				{ oldText: "first target\nfirst after", newText: "FIRST\nFIRST2" },
-				{ oldText: "second target\nsecond after", newText: "SECOND\nSECOND2" },
+				{ old: "first target\nfirst after", new: "FIRST\nFIRST2" },
+				{ old: "second target\nsecond after", new: "SECOND\nSECOND2" },
 			],
 		});
 
@@ -1096,14 +1096,14 @@ describe("edit tool CRLF handling", () => {
 		rmSync(testDir, { recursive: true, force: true });
 	});
 
-	it("should match LF oldText against CRLF file content", async () => {
+	it("should match LF old against CRLF file content", async () => {
 		const testFile = join(testDir, "crlf-test.txt");
 
 		writeFileSync(testFile, "line one\r\nline two\r\nline three\r\n");
 
 		const result = await editTool.execute("test-crlf-1", {
 			path: testFile,
-			edits: [{ oldText: "line two\n", newText: "replaced line\n" }],
+			edits: [{ old: "line two\n", new: "replaced line\n" }],
 		});
 
 		expect(getTextOutput(result)).toContain("Successfully replaced");
@@ -1115,7 +1115,7 @@ describe("edit tool CRLF handling", () => {
 
 		await editTool.execute("test-crlf-2", {
 			path: testFile,
-			edits: [{ oldText: "second\n", newText: "REPLACED\n" }],
+			edits: [{ old: "second\n", new: "REPLACED\n" }],
 		});
 
 		const content = readFileSync(testFile, "utf-8");
@@ -1128,7 +1128,7 @@ describe("edit tool CRLF handling", () => {
 
 		await editTool.execute("test-lf-1", {
 			path: testFile,
-			edits: [{ oldText: "second\n", newText: "REPLACED\n" }],
+			edits: [{ old: "second\n", new: "REPLACED\n" }],
 		});
 
 		const content = readFileSync(testFile, "utf-8");
@@ -1143,7 +1143,7 @@ describe("edit tool CRLF handling", () => {
 		await expect(
 			editTool.execute("test-crlf-dup", {
 				path: testFile,
-				edits: [{ oldText: "hello\nworld\n", newText: "replaced\n" }],
+				edits: [{ old: "hello\nworld\n", new: "replaced\n" }],
 			}),
 		).rejects.toThrow(/Found 2 occurrences/);
 	});
@@ -1154,7 +1154,7 @@ describe("edit tool CRLF handling", () => {
 
 		await editTool.execute("test-bom", {
 			path: testFile,
-			edits: [{ oldText: "second\n", newText: "REPLACED\n" }],
+			edits: [{ old: "second\n", new: "REPLACED\n" }],
 		});
 
 		const content = readFileSync(testFile, "utf-8");
@@ -1168,8 +1168,8 @@ describe("edit tool CRLF handling", () => {
 		await editTool.execute("test-crlf-multi", {
 			path: testFile,
 			edits: [
-				{ oldText: "second\n", newText: "SECOND\n" },
-				{ oldText: "fourth\n", newText: "FOURTH\n" },
+				{ old: "second\n", new: "SECOND\n" },
+				{ old: "fourth\n", new: "FOURTH\n" },
 			],
 		});
 
