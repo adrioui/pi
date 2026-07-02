@@ -624,7 +624,7 @@ export async function restoreModelFromSession(
 	const hasConfiguredAuth = restoredModel ? modelRegistry.hasConfiguredAuth(restoredModel) : false;
 
 	if (restoredModel && hasConfiguredAuth) {
-		if (shouldPrintMessages) {
+		if (shouldPrintMessages && process.env.PI_DEBUG === "1") {
 			console.log(chalk.dim(`Restored model: ${savedProvider}/${savedModelId}`));
 		}
 		return { model: restoredModel, fallbackMessage: undefined };
@@ -639,7 +639,7 @@ export async function restoreModelFromSession(
 
 	// If we already have a model, use it as fallback
 	if (currentModel) {
-		if (shouldPrintMessages) {
+		if (shouldPrintMessages && process.env.PI_DEBUG === "1") {
 			console.log(chalk.dim(`Falling back to: ${currentModel.provider}/${currentModel.id}`));
 		}
 		return {
@@ -668,7 +668,7 @@ export async function restoreModelFromSession(
 			fallbackModel = availableModels[0];
 		}
 
-		if (shouldPrintMessages) {
+		if (shouldPrintMessages && process.env.PI_DEBUG === "1") {
 			console.log(chalk.dim(`Falling back to: ${fallbackModel.provider}/${fallbackModel.id}`));
 		}
 
