@@ -26,6 +26,7 @@ import {
 	type ProjectionDefinition,
 	type RoleDefinition,
 } from "@earendil-works/pi-event-core";
+import { Effect, Exit, type Fiber, Queue, Scope } from "effect";
 import { AgentModelResolver } from "./agent-model-resolver.ts";
 import type { AgentSession, AgentSessionEvent } from "./agent-session.ts";
 import type { AgentSessionServices } from "./agent-session-services.ts";
@@ -33,7 +34,7 @@ import { resolvePreferredAuxModel, runAuxModelText } from "./aux-model.ts";
 import { ForkRuntime } from "./fork-runtime.ts";
 import { verifyGoal } from "./goal-verifier.ts";
 import { COORDINATOR_ON_IDLE, COORDINATOR_ON_SPAWN } from "./role-prompts/lifecycle-hooks.ts";
-import { JUSTIFICATION_TEMPLATES, JUSTIFICATION_VALUES } from "./role-prompts/observer.ts";
+import { JUSTIFICATION_TEMPLATES, JUSTIFICATION_VALUES, OBSERVER_PROMPT } from "./role-prompts/observer.ts";
 import { getSystemPrompt } from "./role-prompts/worker-base.ts";
 import { createCheckpointId, createSnapshot, isGitRepo } from "./snapshot.ts";
 import { TasteProfileStore, type TasteSignalType } from "./taste.ts";
@@ -42,6 +43,11 @@ import { registerForkRuntime, unregisterForkRuntime } from "./tools/role-control
 import { WorkerExecutor } from "./worker-executor.ts";
 
 type RuntimeEvent = EventEnvelope<string, Record<string, unknown>>;
+interface OrchestratorWorkItem {
+	task: () => Promise<void> | void;
+	resolve: () => void;
+	reject: (error: unknown) => void;
+}
 
 interface SessionOverviewProjection {
 	sessionId: string;
@@ -479,6 +485,7 @@ export class SessionOrchestrator {
 	private readonly metaPath?: string;
 	private readonly projectionsPath?: string;
 	private readonly controller = new AbortController();
+	private readonly cleanupScope = Scope.makeUnsafe("sequential");
 	private readonly existingEvents: RuntimeEvent[];
 	private readonly forkRuntime: ForkRuntime;
 	private readonly thinkingGovernor: ThinkingGovernor;
@@ -487,11 +494,13 @@ export class SessionOrchestrator {
 	private turnOutcomeCount: number;
 	private lastEventId?: string;
 	private unsubscribe?: () => void;
-	private eventQueue: Promise<void> = Promise.resolve();
+	private readonly eventQueue = Effect.runSync(Queue.bounded<OrchestratorWorkItem>(1024));
+	private readonly eventConsumerFiber: Fiber.Fiber<never, unknown>;
 	private previousGitStatus: string | undefined;
 	private readonly streamingParsers = new Map<string, StreamingFieldParser>();
 	private workerExecutor: WorkerExecutor | undefined;
 	private errorPublishingDepth = 0;
+	private disposed = false;
 
 	constructor(session: AgentSession, services: AgentSessionServices) {
 		this.session = session;
@@ -644,6 +653,46 @@ export class SessionOrchestrator {
 			},
 		});
 		this.sink.registerRole(this.workerExecutor.asRole());
+		this.eventConsumerFiber = this.startEventConsumer();
+		this.registerCleanupFinalizers();
+	}
+
+	private startEventConsumer(): Fiber.Fiber<never, unknown> {
+		return Effect.runFork(
+			Effect.forever(
+				Effect.flatMap(Queue.take(this.eventQueue), (work) =>
+					Effect.tryPromise(async () => {
+						try {
+							await work.task();
+							work.resolve();
+						} catch (error) {
+							work.reject(error);
+						}
+					}),
+				),
+			),
+		);
+	}
+
+	private registerCleanupFinalizers(): void {
+		for (const finalizer of [
+			() => this.controller.abort(),
+			() => this.workerExecutor?.dispose(),
+			() => this.sink.dispose(),
+			() => {
+				this.unsubscribe?.();
+				this.unsubscribe = undefined;
+			},
+			() => unregisterForkRuntime(this.session.sessionId),
+			() => this.thinkingGovernor.resetAll(),
+			() => this.streamingParsers.clear(),
+			() => {
+				void Effect.runPromise(Queue.shutdown(this.eventQueue));
+				this.eventConsumerFiber.interruptUnsafe();
+			},
+		]) {
+			Effect.runSync(Scope.addFinalizer(this.cleanupScope, Effect.sync(finalizer)));
+		}
 	}
 
 	async initialize(): Promise<void> {
@@ -712,13 +761,9 @@ export class SessionOrchestrator {
 	}
 
 	dispose(): void {
-		this.controller.abort();
-		this.workerExecutor?.dispose();
-		this.sink.dispose();
-		this.unsubscribe?.();
-		this.unsubscribe = undefined;
-		unregisterForkRuntime(this.session.sessionId);
-		this.thinkingGovernor.resetAll();
+		if (this.disposed) return;
+		this.disposed = true;
+		Effect.runSync(Scope.close(this.cleanupScope, Exit.void));
 	}
 
 	private createCheckpoint(kind: "turn-start" | "turn-end" | "manual" | "redo"):
@@ -785,7 +830,7 @@ export class SessionOrchestrator {
 							sessionId: this.session.sessionId,
 							signal,
 							systemPrompt: [
-								"You are an observer worker for a coding agent.",
+								OBSERVER_PROMPT,
 								"Assess whether the latest turn shows difficulty, churn, or frustration.",
 								'Return a single JSON object with boolean keys "difficulty", "churn", "frustration", "escalate" and string key "justification".',
 								'The justification value must be exactly one of: "difficulty", "churn", "frustration".',
@@ -1402,6 +1447,11 @@ export class SessionOrchestrator {
 					name: event.name,
 				});
 				break;
+			case "session_shutdown":
+				next("session.shutdown", {
+					reason: event.reason,
+				});
+				break;
 			case "thinking_level_changed":
 				next("session.thinking_level_changed", {
 					level: event.level,
@@ -1519,11 +1569,10 @@ export class SessionOrchestrator {
 	}
 
 	private async enqueue(task: () => Promise<void> | void): Promise<void> {
-		const next = this.eventQueue.then(async () => {
-			await task();
+		if (this.disposed) return;
+		await new Promise<void>((resolve, reject) => {
+			Effect.runPromise(Queue.offer(this.eventQueue, { task, resolve, reject })).catch(reject);
 		});
-		this.eventQueue = next.catch(() => {});
-		await next;
 	}
 }
 
