@@ -48,18 +48,24 @@ export async function execCommand(
 		let stderr = "";
 		let killed = false;
 		let timeoutId: NodeJS.Timeout | undefined;
+		let sigkillTimeoutId: NodeJS.Timeout | undefined;
 
 		const killProcess = () => {
 			if (!killed) {
 				killed = true;
 				proc.kill("SIGTERM");
 				// Force kill after 5 seconds if SIGTERM doesn't work
-				setTimeout(() => {
+				sigkillTimeoutId = setTimeout(() => {
 					if (!proc.killed) {
 						proc.kill("SIGKILL");
 					}
 				}, 5000);
 			}
+		};
+
+		const cleanupTimers = () => {
+			if (timeoutId) clearTimeout(timeoutId);
+			if (sigkillTimeoutId) clearTimeout(sigkillTimeoutId);
 		};
 
 		// Handle abort signal
@@ -90,14 +96,14 @@ export async function execCommand(
 		// held open by detached descendants.
 		waitForChildProcess(proc)
 			.then((code) => {
-				if (timeoutId) clearTimeout(timeoutId);
+				cleanupTimers();
 				if (options?.signal) {
 					options.signal.removeEventListener("abort", killProcess);
 				}
 				resolve({ stdout, stderr, code: code ?? 0, killed });
 			})
 			.catch((_err) => {
-				if (timeoutId) clearTimeout(timeoutId);
+				cleanupTimers();
 				if (options?.signal) {
 					options.signal.removeEventListener("abort", killProcess);
 				}
