@@ -96,6 +96,7 @@ import { expandPromptTemplate, type PromptTemplate, parseCommandArgs } from "./p
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { LEADER_PROMPT } from "./role-prompts/leader.ts";
 import { ScratchpadManager } from "./scratchpad-manager.ts";
+import { SessionCancellationScope } from "./session-cancellation-scope.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import { readSessionContext } from "./session-reader.ts";
@@ -165,6 +166,7 @@ export type AgentSessionEvent =
 	  }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "session_info_changed"; name: string | undefined }
+	| { type: "session_shutdown"; reason: "reload" | "dispose" }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| {
 			type: "compaction_end";
@@ -356,6 +358,7 @@ export class AgentSession {
 	// Bash execution state
 	private _bashAbortController: AbortController | undefined = undefined;
 	private _pendingBashMessages: BashExecutionMessage[] = [];
+	private readonly _cancellationScope = new SessionCancellationScope();
 
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
@@ -1017,11 +1020,13 @@ export class AgentSession {
 	 */
 	dispose(): void {
 		try {
+			this._emit({ type: "session_shutdown", reason: "dispose" });
 			this.abortRetry();
 			this.abortCompaction();
 			this.abortBranchSummary();
 			this.abortBash();
 			this.agent.abort();
+			this._cancellationScope.close();
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
 		}
@@ -2187,7 +2192,7 @@ export class AgentSession {
 	async compact(customInstructions?: string): Promise<CompactionResult> {
 		this._disconnectFromAgent();
 		await this.abort();
-		this._compactionAbortController = new AbortController();
+		this._compactionAbortController = this._cancellationScope.create("compaction");
 		this._emit({ type: "compaction_start", reason: "manual" });
 
 		try {
@@ -2317,6 +2322,7 @@ export class AgentSession {
 			});
 			throw error;
 		} finally {
+			this._cancellationScope.clear("compaction", this._compactionAbortController);
 			this._compactionAbortController = undefined;
 			this._reconnectToAgent();
 		}
@@ -2349,7 +2355,7 @@ export class AgentSession {
 	 * go through the manual compact() path.
 	 */
 	private async _runAutoCompaction(reason: "threshold" | "overflow", willRetry: boolean): Promise<boolean> {
-		this._compactionAbortController = new AbortController();
+		this._compactionAbortController = this._cancellationScope.create("compaction");
 		let started = false;
 		try {
 			if (!this.model) {
@@ -2477,6 +2483,7 @@ export class AgentSession {
 			}
 			return false;
 		} finally {
+			this._cancellationScope.clear("compaction", this._compactionAbortController);
 			this._compactionAbortController = undefined;
 		}
 	}
@@ -2556,14 +2563,14 @@ export class AgentSession {
 	 * Cancel in-progress compaction (manual or auto).
 	 */
 	abortCompaction(): void {
-		this._compactionAbortController?.abort();
+		this._cancellationScope.abort("compaction");
 	}
 
 	/**
 	 * Cancel in-progress branch summarization.
 	 */
 	abortBranchSummary(): void {
-		this._branchSummaryAbortController?.abort();
+		this._cancellationScope.abort("branchSummary");
 	}
 
 	/**
@@ -3125,6 +3132,7 @@ export class AgentSession {
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
 		const previousFlagValues = this._extensionRunner.getFlagValues();
+		this._emit({ type: "session_shutdown", reason: "reload" });
 		await emitSessionShutdownEvent(this._extensionRunner, {
 			type: "session_shutdown",
 			reason: "reload",
@@ -3233,7 +3241,7 @@ export class AgentSession {
 		}
 
 		// Wait with exponential backoff (abortable)
-		this._retryAbortController = new AbortController();
+		this._retryAbortController = this._cancellationScope.create("retry");
 		try {
 			await sleep(delayMs, this._retryAbortController.signal);
 		} catch {
@@ -3248,6 +3256,7 @@ export class AgentSession {
 			});
 			return false;
 		} finally {
+			this._cancellationScope.clear("retry", this._retryAbortController);
 			this._retryAbortController = undefined;
 		}
 
@@ -3258,7 +3267,7 @@ export class AgentSession {
 	 * Cancel in-progress retry.
 	 */
 	abortRetry(): void {
-		this._retryAbortController?.abort();
+		this._cancellationScope.abort("retry");
 	}
 
 	/**
@@ -3307,7 +3316,7 @@ export class AgentSession {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; operations?: BashOperations },
 	): Promise<BashResult> {
-		this._bashAbortController = new AbortController();
+		this._bashAbortController = this._cancellationScope.create("bash");
 
 		// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
 		const prefix = this.settingsManager.getShellCommandPrefix();
@@ -3328,6 +3337,7 @@ export class AgentSession {
 			this.recordBashResult(command, result, options);
 			return result;
 		} finally {
+			this._cancellationScope.clear("bash", this._bashAbortController);
 			this._bashAbortController = undefined;
 		}
 	}
@@ -3366,7 +3376,7 @@ export class AgentSession {
 	 * Cancel running bash command.
 	 */
 	abortBash(): void {
-		this._bashAbortController?.abort();
+		this._cancellationScope.abort("bash");
 	}
 
 	/** Whether a bash command is currently running */
@@ -3482,7 +3492,7 @@ export class AgentSession {
 		};
 
 		// Set up abort controller for summarization
-		this._branchSummaryAbortController = new AbortController();
+		this._branchSummaryAbortController = this._cancellationScope.create("branchSummary");
 
 		try {
 			let extensionSummary: { summary: string; details?: unknown } | undefined;
@@ -3621,6 +3631,7 @@ export class AgentSession {
 
 			return { editorText, cancelled: false, summaryEntry };
 		} finally {
+			this._cancellationScope.clear("branchSummary", this._branchSummaryAbortController);
 			this._branchSummaryAbortController = undefined;
 		}
 	}
