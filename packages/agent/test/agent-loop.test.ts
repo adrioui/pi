@@ -1228,6 +1228,152 @@ describe("agentLoop with AgentMessage", () => {
 
 		expect(llmCalls).toBe(1);
 	});
+
+	it("should recover OpenAI-compatible tool calls emitted as JSON text", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+					terminate: true,
+				};
+			},
+		};
+
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage([
+					{ type: "text", text: '{"name":"echo","arguments":{"value":"hello"}}' },
+				]);
+				mockStream.push({ type: "done", reason: "stop", message });
+			});
+			return mockStream;
+		});
+
+		const events: AgentEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const messages = await stream.result();
+		expect(executed).toEqual(["hello"]);
+		expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
+		expect(events.some((event) => event.type === "tool_execution_start" && event.toolName === "echo")).toBe(true);
+	});
+
+	it("should recover alternate tool-call JSON dialects emitted as text", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+					terminate: true,
+				};
+			},
+		};
+
+		for (const text of ['{"caller":"echo","tool_input":{"value":"caller"}}', '{"echo":{"value":"wrapped"}}']) {
+			const context: AgentContext = {
+				systemPrompt: "",
+				messages: [],
+				tools: [tool],
+			};
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+			};
+
+			const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, () => {
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage([{ type: "text", text }]);
+					mockStream.push({ type: "done", reason: "stop", message });
+				});
+				return mockStream;
+			});
+
+			for await (const _event of stream) {
+				// consume
+			}
+		}
+
+		expect(executed).toEqual(["caller", "wrapped"]);
+	});
+
+	it("should recover worker-spec JSON emitted as text", async () => {
+		const toolSchema = Type.Object({ role: Type.String(), message: Type.Optional(Type.String()) });
+		const executed: Array<{ role: string; message?: string }> = [];
+		const tool: AgentTool<typeof toolSchema, { role: string; message?: string }> = {
+			name: "spawnWorker",
+			label: "Spawn worker",
+			description: "Spawn worker",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params);
+				return {
+					content: [{ type: "text", text: "spawned" }],
+					details: params,
+					terminate: true,
+				};
+			},
+		};
+
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+
+		const stream = agentLoop([createUserMessage("spawn scout")], context, config, undefined, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage([
+					{
+						type: "text",
+						text: '{"task":"Inspect files","worker":{"role":"scout","task_description":"Read session logs"}}',
+					},
+				]);
+				mockStream.push({ type: "done", reason: "stop", message });
+			});
+			return mockStream;
+		});
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(executed).toEqual([{ role: "scout", message: "Read session logs" }]);
+	});
 });
 
 describe("agentLoopContinue with AgentMessage", () => {

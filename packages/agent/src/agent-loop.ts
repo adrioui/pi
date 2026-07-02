@@ -190,7 +190,11 @@ async function runLoop(
 			}
 
 			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			const rawMessage = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			const message = recoverTextToolCall(rawMessage, currentContext.tools);
+			if (message !== rawMessage) {
+				currentContext.messages[currentContext.messages.length - 1] = message;
+			}
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
@@ -253,7 +257,17 @@ async function runLoop(
 			pendingMessages = (await config.getSteeringMessages?.()) || [];
 		}
 
-		// Agent would stop here. Check for follow-up messages.
+		// Agent would stop here. Check for steering or follow-up messages.
+		// Steering messages queued during the last assistant response (e.g.,
+		// user typed while LLM was streaming a text-only reply) must be
+		// injected as a new turn within the same run, not deferred to a
+		// separate prompt() call that treats them as a fresh conversation.
+		const queuedSteering = (await config.getSteeringMessages?.()) || [];
+		if (queuedSteering.length > 0) {
+			pendingMessages = queuedSteering;
+			continue;
+		}
+
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
 		if (followUpMessages.length > 0) {
 			// Set as pending so inner loop processes them
@@ -365,6 +379,108 @@ async function streamAssistantResponse(
 	}
 	await emit({ type: "message_end", message: finalMessage });
 	return finalMessage;
+}
+
+function recoverTextToolCall(message: AssistantMessage, tools: AgentTool<any>[] | undefined): AssistantMessage {
+	if (message.stopReason === "error" || message.stopReason === "aborted") return message;
+	if (message.content.some((content) => content.type === "toolCall")) return message;
+	const text = message.content
+		.filter((content) => content.type === "text")
+		.map((content) => content.text)
+		.join("")
+		.trim();
+	if (!text) return message;
+
+	const recovered = parseTextToolCall(text, tools);
+	if (!recovered) return message;
+
+	return {
+		...message,
+		content: [
+			{
+				type: "toolCall",
+				id: `recovered-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+				name: recovered.name,
+				arguments: recovered.arguments,
+			},
+		],
+		stopReason: "toolUse",
+	};
+}
+
+function parseTextToolCall(
+	text: string,
+	tools: AgentTool<any>[] | undefined,
+): { name: string; arguments: Record<string, unknown> } | undefined {
+	if (!tools || tools.length === 0) return undefined;
+	if (!text.startsWith("{") || !text.endsWith("}")) return undefined;
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+
+	const obj = parsed as Record<string, unknown>;
+	const toolNames = new Set(tools.map((tool) => tool.name));
+	const namedCall = parseNamedToolCall(obj, toolNames);
+	if (namedCall) return namedCall;
+	const workerSpecCall = parseWorkerSpecToolCall(obj, toolNames);
+	if (workerSpecCall) return workerSpecCall;
+
+	for (const toolName of toolNames) {
+		const value = obj[toolName];
+		const args = normalizeToolCallArguments(value);
+		if (args) return { name: toolName, arguments: args };
+	}
+
+	return undefined;
+}
+
+function parseNamedToolCall(
+	obj: Record<string, unknown>,
+	toolNames: Set<string>,
+): { name: string; arguments: Record<string, unknown> } | undefined {
+	const rawName = obj.name ?? obj.tool ?? obj.caller;
+	if (typeof rawName !== "string" || !toolNames.has(rawName)) return undefined;
+	const rawArgs = obj.arguments ?? obj.args ?? obj.input ?? obj.tool_input;
+	const args = normalizeToolCallArguments(rawArgs);
+	if (!args) return undefined;
+	return { name: rawName, arguments: args };
+}
+
+function parseWorkerSpecToolCall(
+	obj: Record<string, unknown>,
+	toolNames: Set<string>,
+): { name: string; arguments: Record<string, unknown> } | undefined {
+	if (!toolNames.has("spawnWorker")) return undefined;
+	const worker = obj.worker;
+	if (!worker || typeof worker !== "object" || Array.isArray(worker)) return undefined;
+	const workerObj = worker as Record<string, unknown>;
+	if (typeof workerObj.role !== "string") return undefined;
+	const message = workerObj.message ?? workerObj.task_description ?? workerObj.task ?? obj.task;
+	const args: Record<string, unknown> = { role: workerObj.role };
+	if (typeof message === "string") {
+		args.message = message;
+	}
+	if (typeof workerObj.taskId === "string") {
+		args.taskId = workerObj.taskId;
+	}
+	return { name: "spawnWorker", arguments: args };
+}
+
+function normalizeToolCallArguments(value: unknown): Record<string, unknown> | undefined {
+	if (typeof value === "string") {
+		try {
+			return normalizeToolCallArguments(JSON.parse(value));
+		} catch {
+			return undefined;
+		}
+	}
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	return value as Record<string, unknown>;
 }
 
 /**
