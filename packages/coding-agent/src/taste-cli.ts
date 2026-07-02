@@ -2,7 +2,6 @@ import { type AgentSessionServices, createAgentSessionServices } from "./core/ag
 import { resolvePreferredAuxModel } from "./core/aux-model.ts";
 import { TasteProfileStore, type TasteScope } from "./core/taste.ts";
 import { runLearnPipeline } from "./core/taste-git-history.ts";
-import { parsePackageSlug, TasteRegistry } from "./core/taste-registry.ts";
 import { resolvePath } from "./utils/paths.ts";
 
 function takeFlag(args: string[], name: string): string | undefined {
@@ -60,11 +59,7 @@ export async function handleTasteCommand(args: string[]): Promise<boolean> {
 	const project = takeBooleanFlag(mutableArgs, "--project");
 	const global = takeBooleanFlag(mutableArgs, "--global");
 	const scope: TasteScope = project ? "project" : global ? "global" : "auto";
-	// For push/pull, the first positional arg is the slug, not a workspace path
-	const pushPullSubcommands = new Set(["push", "pull", "registry-list"]);
-	const workspace = pushPullSubcommands.has(subcommand)
-		? resolvePath(process.cwd())
-		: resolvePath(mutableArgs[0] ?? process.cwd());
+	const workspace = resolvePath(mutableArgs[0] ?? process.cwd());
 	const store = new TasteProfileStore(undefined, scope);
 
 	if (subcommand === "status") {
@@ -117,58 +112,6 @@ export async function handleTasteCommand(args: string[]): Promise<boolean> {
 			scope,
 		});
 		console.log(JSON.stringify(result, null, 2));
-		return true;
-	}
-
-	if (subcommand === "push") {
-		const slug = mutableArgs[0];
-		if (!slug)
-			throw new Error("Usage: taste push <namespace/name> [--visibility public|private] [--description ...]");
-		const { namespace, name } = parsePackageSlug(slug);
-		const content = store.getProfile(workspace);
-		if (!content) throw new Error(`No taste profile found at ${store.getProfilePath(workspace)}`);
-		const visibility = (takeFlag(mutableArgs, "--visibility") as "public" | "private") ?? "private";
-		const description = takeFlag(mutableArgs, "--description");
-		const registry = new TasteRegistry();
-		const result = registry.push({
-			namespace,
-			name,
-			content,
-			visibility,
-			description,
-		});
-		console.log(JSON.stringify(result, null, 2));
-		return true;
-	}
-
-	if (subcommand === "pull") {
-		const slug = mutableArgs[0];
-		if (!slug) throw new Error("Usage: taste pull <namespace/name>");
-		const { namespace, name } = parsePackageSlug(slug);
-		const registry = new TasteRegistry();
-		const destDir = store.getWorkspaceDir(workspace);
-		const result = registry.pull(namespace, name, destDir);
-		console.log(JSON.stringify(result, null, 2));
-		return true;
-	}
-
-	if (subcommand === "registry-list") {
-		const registry = new TasteRegistry();
-		const ns = takeFlag(mutableArgs, "--namespace");
-		const vis = takeFlag(mutableArgs, "--visibility") as "public" | "private" | undefined;
-		const entries = registry.list({ namespace: ns, visibility: vis });
-		console.log(
-			JSON.stringify(
-				entries.map((e) => ({
-					slug: `${e.package.namespace}/${e.package.name}`,
-					version: e.package.version,
-					visibility: e.package.visibility,
-					description: e.package.description,
-				})),
-				null,
-				2,
-			),
-		);
 		return true;
 	}
 
