@@ -8,7 +8,6 @@ import {
 	createDisplayWorker,
 	createFileMentionResolverWorker,
 	createGoalProjection,
-	createGoalWorker,
 	createSignal,
 	createTaskGraphProjection,
 	DefaultEventSink,
@@ -221,18 +220,17 @@ describe("event-core", () => {
 		expect(projections.get<{ goal: string | null; status: string }>("Goal")?.status).toBe("finished");
 	});
 
-	it("GoalWorker derives lifecycle events from active goal turn outcomes", async () => {
+	it("turn outcomes do not derive goal lifecycle events without verifier payloads", async () => {
 		const store = new InMemoryEventStore<RuntimeEvent>();
 		const sink = new DefaultEventSink<RuntimeEvent>(store);
 		sink.registerProjection(createGoalProjection<RuntimeEvent>());
-		sink.registerRole(createGoalWorker<RuntimeEvent>());
 
 		await sink.publish(runtimeEvent(1, "goal.injected", { goal: "Ship fix" }));
 		await sink.publish(runtimeEvent(2, "turn_outcome", { result: "finished", turnId: "turn-1" }));
 		await sink.waitForIdle();
 
-		expect(store.list().map((current) => current.type)).toEqual(["goal.injected", "turn_outcome", "goal.finished"]);
-		expect(sink.projections().get<{ goal: string | null; status: string }>("Goal")?.status).toBe("finished");
+		expect(store.list().map((current) => current.type)).toEqual(["goal.injected", "turn_outcome"]);
+		expect(sink.projections().get<{ goal: string | null; status: string }>("Goal")?.status).toBe("started");
 		sink.dispose();
 	});
 

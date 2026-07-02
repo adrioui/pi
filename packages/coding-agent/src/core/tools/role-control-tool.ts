@@ -163,8 +163,7 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
 };
 
 /**
- * Create a role control tool definition with per-tool schema and
- * fork-runtime wiring. Replaces the shared throw-stub.
+ * Create a role control tool definition with per-tool schema and fork-runtime wiring.
  */
 export function createRoleControlTool(name: string, description: string): ToolDefinition {
 	return defineTool({

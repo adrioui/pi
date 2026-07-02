@@ -5,6 +5,7 @@ import { homedir, platform, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
+	allowUnknownFieldsForStreaming,
 	formatCorrectiveFeedback,
 	type Model,
 	registerSessionResourceCleanup,
@@ -596,15 +597,16 @@ export class SessionOrchestrator {
 					forkId: result.forkId,
 					role: result.role,
 					result: result.text,
+					stopReason: result.stopReason ?? "finished",
 				}).catch(() => {});
 				void this.session
 					.sendCustomMessage(
 						{
 							customType: "worker-result",
-							content: `<worker_result role="${result.role}">\n${result.text}\n</worker_result>`,
+							content: `<worker_result role="${result.role}" stopReason="${result.stopReason ?? "finished"}">\n${result.text}\n</worker_result>`,
 							display: true,
 						},
-						undefined,
+						this.session.isStreaming ? undefined : { triggerTurn: true },
 					)
 					.catch(() => {});
 				const guidance = COORDINATOR_ON_IDLE[result.role];
@@ -625,8 +627,20 @@ export class SessionOrchestrator {
 				void this.publishRuntimeEvent("worker_error", {
 					agentId: error.agentId,
 					forkId: error.forkId,
+					role: error.role,
 					error: error.error,
+					stopReason: "error",
 				}).catch(() => {});
+				void this.session
+					.sendCustomMessage(
+						{
+							customType: "worker-error",
+							content: `<worker_error role="${error.role}" workerId="${error.agentId}" stopReason="error">\n${error.error}\n</worker_error>`,
+							display: true,
+						},
+						this.session.isStreaming ? undefined : { triggerTurn: true },
+					)
+					.catch(() => {});
 			},
 		});
 		this.sink.registerRole(this.workerExecutor.asRole());
@@ -987,8 +1001,10 @@ export class SessionOrchestrator {
 					this.session.model,
 				);
 				await this.publishRuntimeEvent(verdict.verdict === "finished" ? "goal.finished" : "goal.incomplete", {
+					goal: goalText,
 					evidence: String(event.payload.evidence ?? verdict.evidence),
 					source: verdict.source,
+					verdict: verdict.verdict,
 				});
 			},
 		};
@@ -1063,6 +1079,9 @@ export class SessionOrchestrator {
 			let schema: ReturnType<typeof typeboxToStreamingSchema>;
 			try {
 				schema = typeboxToStreamingSchema(tool.parameters);
+				if (typeof tool.prepareArguments === "function") {
+					schema = allowUnknownFieldsForStreaming(schema);
+				}
 			} catch {
 				return;
 			}
@@ -1138,8 +1157,10 @@ export class SessionOrchestrator {
 				await this.publishRuntimeEventUnqueued(
 					verdict.verdict === "finished" ? "goal.finished" : "goal.incomplete",
 					{
+						goal: goal.goal,
 						evidence: verdict.evidence,
 						source: verdict.source,
+						verdict: verdict.verdict,
 					},
 				);
 			} catch (err) {
@@ -1238,6 +1259,9 @@ export class SessionOrchestrator {
 					context: "",
 					mode: "continue",
 					message: "Session leader started",
+					model: this.session.model
+						? { provider: this.session.model.provider, id: this.session.model.id }
+						: undefined,
 				});
 				break;
 			case "agent_end": {
@@ -1267,6 +1291,15 @@ export class SessionOrchestrator {
 					firstTurn: this.turnOutcomeCount === 1,
 					messageRole: event.message.role,
 					toolResultCount: event.toolResults.length,
+					stopReason: (event.message as { stopReason?: string }).stopReason,
+					agentId: this.session.sessionId,
+				});
+				break;
+			case "skill_activated":
+				next("skill_activated", {
+					skillName: event.skillName,
+					skillPath: event.skillPath,
+					hasArgs: event.hasArgs,
 				});
 				break;
 			case "message_start":
@@ -1440,6 +1473,7 @@ export class SessionOrchestrator {
 
 	private async publishInternal(event: RuntimeEvent): Promise<void> {
 		await this.sink.publish(event);
+		this.session.emitRuntimeEvent(event);
 		void this.sink.waitForIdle().catch((error) => {
 			if (this.errorPublishingDepth < 3) {
 				this.errorPublishingDepth++;

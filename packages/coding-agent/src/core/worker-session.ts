@@ -24,6 +24,7 @@ import {
 } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import {
+	allowUnknownFieldsForStreaming,
 	composePayloadHooks,
 	createGrammarInjector,
 	createStructuredOutputInjector,
@@ -43,6 +44,7 @@ export interface WorkerTool {
 	name: string;
 	description: string;
 	parameters: TSchema;
+	prepareArguments?: (args: unknown) => unknown;
 	execute: (
 		id: string,
 		args: unknown,
@@ -75,6 +77,7 @@ function toAgentTool(tool: WorkerTool): AgentTool {
 		label: tool.name,
 		description: tool.description,
 		parameters: tool.parameters,
+		prepareArguments: tool.prepareArguments,
 		execute: tool.execute,
 	};
 }
@@ -90,6 +93,10 @@ export class WorkerSession {
 	private thinkingCharCount = 0;
 	private turnCount = 0;
 	private stoppedForMaxTurns = false;
+	private maxTurnWarningSent = false;
+	private loopActive = false;
+	private finished = false;
+	private killed = false;
 	private readonly maxTurns: number;
 	private readonly streamingParsers = new Map<string, StreamingFieldParser>();
 	private pendingToolValidationFeedback: string | undefined = undefined;
@@ -98,7 +105,7 @@ export class WorkerSession {
 
 	constructor(config: WorkerSessionConfig) {
 		this.config = config;
-		this.maxTurns = config.maxTurns ?? 15;
+		this.maxTurns = config.maxTurns ?? 30;
 
 		// Convert worker tools to agent tools
 		const agentTools = config.tools.map(toAgentTool);
@@ -149,25 +156,66 @@ export class WorkerSession {
 			content: text,
 			timestamp: Date.now(),
 		} as AgentMessage);
+		// If the agent loop has already exited (worker was idle), a bare steer() only
+		// enqueues; nobody drains it. Re-enter the loop so the message is processed.
+		this.maybeRetrigger();
 	}
 
 	kill(): void {
+		this.killed = true;
 		this.agent.abort();
 	}
 
 	async start(): Promise<void> {
+		await this.runLoop();
+	}
+
+	/** Re-enter the agent loop if it has exited and the worker is still alive. */
+	private maybeRetrigger(): void {
+		if (this.loopActive || this.finished || this.killed) return;
+		void this.runLoop();
+	}
+
+	/**
+	 * Run the agent until idle, then re-run if messages were steered in after the
+	 * loop drained but before we finish. The `loopActive` guard makes this safe to
+	 * call from both start() and deliverMessage() without double-entering.
+	 */
+	private async runLoop(): Promise<void> {
+		if (this.loopActive || this.finished || this.killed) return;
+		this.loopActive = true;
 		try {
 			await this.runUntilIdle();
+			while (!this.stoppedForMaxTurns && !this.killed && this.agent.hasQueuedMessages()) {
+				await this.runUntilIdle();
+			}
 		} catch (err) {
+			this.loopActive = false;
+			this.finished = true;
 			this.unsubscribe();
-			this.config.onError({
-				error: `Worker session crashed: ${err instanceof Error ? err.message : String(err)}`,
-				forkId: this.config.forkId,
-				agentId: this.config.agentId,
-			});
+			if (!this.killed) {
+				this.config.onError({
+					error: `Worker session crashed: ${err instanceof Error ? err.message : String(err)}`,
+					forkId: this.config.forkId,
+					agentId: this.config.agentId,
+				});
+			}
 			return;
 		}
+		this.loopActive = false;
+		// A message may have been steered in between the while-check and flipping
+		// loopActive off. Re-enter instead of finishing so it is not lost.
+		if (!this.killed && !this.stoppedForMaxTurns && this.agent.hasQueuedMessages()) {
+			void this.runLoop();
+			return;
+		}
+		this.finish();
+	}
 
+	/** Emit the terminal onFinished/onError result exactly once. */
+	private finish(): void {
+		if (this.finished) return;
+		this.finished = true;
 		this.unsubscribe();
 
 		// Check final state
@@ -175,15 +223,16 @@ export class WorkerSession {
 		const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant") as AssistantMessage | undefined;
 
 		if (this.stoppedForMaxTurns) {
-			this.config.onError({
-				error: `Worker reached maximum turns (${this.maxTurns})`,
+			this.config.onFinished({
+				text: this.maxTurnsReportText(),
 				forkId: this.config.forkId,
 				agentId: this.config.agentId,
+				stopReason: "max_turns",
 			});
 			return;
 		}
 
-		if (this.agent.signal?.aborted || lastAssistant?.stopReason === "aborted") {
+		if (this.killed || this.agent.signal?.aborted || lastAssistant?.stopReason === "aborted") {
 			this.config.onError({
 				error: "Worker killed",
 				forkId: this.config.forkId,
@@ -206,7 +255,7 @@ export class WorkerSession {
 			text: this.lastAssistantText() ?? "[Worker reached maximum turns without finishing]",
 			forkId: this.config.forkId,
 			agentId: this.config.agentId,
-			stopReason: this.turnCount >= this.maxTurns ? "max_turns" : undefined,
+			stopReason: this.turnCount >= this.maxTurns ? "max_turns" : "finished",
 		});
 	}
 
@@ -278,6 +327,14 @@ export class WorkerSession {
 				if (this.turnCount >= this.maxTurns) {
 					this.stoppedForMaxTurns = true;
 					this.agent.abort();
+				} else if (!this.maxTurnWarningSent && this.turnCount >= this.maxTurns - 3) {
+					this.maxTurnWarningSent = true;
+					this.agent.steer({
+						role: "user",
+						content:
+							"[System: You are near the worker turn limit. Stop starting new exploration. Return a concise final report now with: outcome, evidence gathered, commands/files checked, verification status, and remaining gaps. If incomplete, say exactly what remains instead of continuing.]",
+						timestamp: Date.now(),
+					} as AgentMessage);
 				}
 				break;
 
@@ -343,7 +400,11 @@ export class WorkerSession {
 			const tool = this.agent.state.tools.find((entry) => entry.name === content.name);
 			if (!tool) return;
 			try {
-				parser = new StreamingFieldParser(typeboxToStreamingSchema(tool.parameters));
+				let schema = typeboxToStreamingSchema(tool.parameters);
+				if (typeof tool.prepareArguments === "function") {
+					schema = allowUnknownFieldsForStreaming(schema);
+				}
+				parser = new StreamingFieldParser(schema);
 			} catch {
 				return;
 			}
@@ -366,6 +427,9 @@ export class WorkerSession {
 	}
 
 	private shouldRetryToolValidation(): boolean {
+		if (this.stoppedForMaxTurns) {
+			return false;
+		}
 		const message = this.lastAssistantMessage();
 		if (message?.stopReason !== "error" || !message.errorMessage?.startsWith("tool_validation:")) {
 			return false;
@@ -493,22 +557,49 @@ export class WorkerSession {
 		if (tokens < threshold) return messages;
 		if (signal?.aborted) return messages;
 
-		// Keep the initial task (first user message) + recent messages
+		// Keep the initial task (first user message) + recent messages.
 		const initialTask = messages[0];
-		let keepFromIndex = Math.max(1, messages.length - 5);
+		let keepFromIndex = Math.max(1, messages.length - 8);
 		while (keepFromIndex > 0 && messages[keepFromIndex]?.role === "toolResult") {
 			keepFromIndex--;
 		}
+		const toCompact = messages.slice(1, keepFromIndex);
 		const recent = messages.slice(keepFromIndex);
+		if (toCompact.length === 0) return messages;
+
+		// Build an extractive summary of the compacted region: truncated per-message
+		// texts, capped at ~2000 chars. Better than a bare placeholder, cheaper than
+		// an LLM summarization call (full LLM compaction is future work).
+		const summary = this.extractiveSummary(toCompact);
+		const note = summary
+			? `[Context compacted. Extractive summary of earlier turns:]\n${summary}\n\n[Use scratchpad_load to retrieve saved findings.]`
+			: "[Context compacted: earlier messages removed. Use scratchpad_load to retrieve saved findings.]";
+
 		return [
 			initialTask,
 			{
 				role: "user",
-				content: "[Context compacted: earlier messages removed. Use scratchpad_load to retrieve saved findings.]",
+				content: note,
 				timestamp: Date.now(),
 			} as AgentMessage,
 			...recent,
 		];
+	}
+
+	/** Concatenate truncated per-message texts, capped at ~2000 chars total. */
+	private extractiveSummary(messages: AgentMessage[]): string {
+		const cap = 2000;
+		const parts: string[] = [];
+		let used = 0;
+		for (const msg of messages) {
+			const text = textFromContent((msg as { content: unknown }).content);
+			if (!text) continue;
+			const slice = text.length > 200 ? `${text.slice(0, 200)}…` : text;
+			if (used + slice.length + 1 > cap) break;
+			parts.push(`${msg.role}: ${slice}`);
+			used += slice.length + 1;
+		}
+		return parts.join("\n");
 	}
 
 	// ─── Helpers ───
@@ -526,6 +617,12 @@ export class WorkerSession {
 			if (text) return text;
 		}
 		return undefined;
+	}
+
+	private maxTurnsReportText(): string {
+		const text = this.lastAssistantText();
+		const prefix = `[Worker reached maximum turns (${this.maxTurns}); treating this as a partial report, not a clean completion.]`;
+		return text ? `${prefix}\n\n${text}` : `${prefix}\n\nNo assistant report was produced before the turn limit.`;
 	}
 
 	private lastAssistantMessage(): AssistantMessage | undefined {

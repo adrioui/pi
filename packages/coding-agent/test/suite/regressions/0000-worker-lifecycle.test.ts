@@ -1,9 +1,17 @@
-import type { AgentEvent } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
+import { type AssistantMessage, type AssistantMessageEvent, EventStream, type Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { DetachedProcessRegistry } from "../../../src/core/detached-process-registry.ts";
 import { IdenticalContinueTracker } from "../../../src/core/identical-continue-tracker.ts";
+import { ARTISAN_PROMPT } from "../../../src/core/role-prompts/artisan.ts";
+import { LEADER_PROMPT } from "../../../src/core/role-prompts/leader.ts";
+import { COORDINATOR_ON_SPAWN } from "../../../src/core/role-prompts/lifecycle-hooks.ts";
+import { ScratchpadManager } from "../../../src/core/scratchpad-manager.ts";
+import { createScratchpadSaveToolDefinition } from "../../../src/core/tools/scratchpad-save.ts";
 import { buildWorkerContext } from "../../../src/core/worker-context-builder.ts";
 import { WorkerExecutor } from "../../../src/core/worker-executor.ts";
 import { WorkerSession, type WorkerTool } from "../../../src/core/worker-session.ts";
@@ -45,6 +53,24 @@ function createAssistantMessage(
 		stopReason,
 		timestamp: Date.now(),
 	};
+}
+
+class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
+	constructor(message: AssistantMessage) {
+		super(
+			(event) => event.type === "done" || event.type === "error",
+			(event) => {
+				if (event.type === "done") return event.message;
+				if (event.type === "error") return event.error;
+				throw new Error("Unexpected event type");
+			},
+		);
+		queueMicrotask(() => {
+			const reason =
+				message.stopReason === "length" || message.stopReason === "toolUse" ? message.stopReason : "stop";
+			this.push({ type: "done", reason, message });
+		});
+	}
 }
 
 describe("WorkerSession", () => {
@@ -174,6 +200,166 @@ describe("WorkerSession", () => {
 		expect(aborted.stopReason).toBe("error");
 		expect(aborted.errorMessage).toContain("tool_validation:");
 		expect(publishEvents).toContain("tool_validation_failed");
+	});
+
+	it("defers unknown-field streaming failures for worker tools with prepareArguments", async () => {
+		const publishEvents: string[] = [];
+		const session = new WorkerSession({
+			forkId: "fork1",
+			agentId: "agent1",
+			role: "scout",
+			model: createWorkerTestModel(),
+			systemPrompt: "You are a scout.",
+			initialMessage: "Edit the file.",
+			tools: [
+				{
+					name: "edit",
+					description: "Edit files",
+					parameters: Type.Object({ path: Type.String() }),
+					prepareArguments: (args) => args,
+					execute: async () => ({ content: [{ type: "text", text: "edited" }], details: null }),
+				},
+			],
+			contextLimit: 128000,
+			maxTurns: 5,
+			publishEvent: async (type) => {
+				publishEvents.push(type);
+			},
+			onFinished: () => {},
+			onError: () => {},
+		});
+
+		const partial = createAssistantMessage(
+			[{ type: "toolCall", id: "call-1", name: "edit", arguments: {} }],
+			"toolUse",
+		);
+		const internals = session as unknown as {
+			handleAgentEvent(event: AgentEvent, signal: AbortSignal): Promise<void>;
+		};
+
+		await internals.handleAgentEvent(
+			{
+				type: "message_update",
+				message: partial,
+				assistantMessageEvent: {
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: '{"path":"file.ts","unexpected":"value"}',
+					partial,
+				},
+			},
+			new AbortController().signal,
+		);
+
+		expect(publishEvents).not.toContain("tool_validation_failed");
+	});
+
+	it("returns a partial report instead of an opaque error at max turns", async () => {
+		let finished:
+			| {
+					text: string;
+					stopReason?: string;
+			  }
+			| undefined;
+		let errored = false;
+		const session = new WorkerSession({
+			forkId: "fork1",
+			agentId: "agent1",
+			role: "scout",
+			model: createWorkerTestModel(),
+			systemPrompt: "You are a scout.",
+			initialMessage: "Investigate and report.",
+			tools: [],
+			contextLimit: 128000,
+			maxTurns: 1,
+			streamFn: () =>
+				new MockAssistantStream(
+					createAssistantMessage([{ type: "text", text: "Partial evidence: inspected README.md." }], "stop"),
+				),
+			onFinished: (result) => {
+				finished = result;
+			},
+			onError: () => {
+				errored = true;
+			},
+		});
+
+		await session.start();
+
+		expect(errored).toBe(false);
+		expect(finished?.stopReason).toBe("max_turns");
+		expect(finished?.text).toContain("partial report");
+		expect(finished?.text).toContain("Partial evidence");
+	});
+
+	it("does not retry tool validation after the max-turn limit is reached", () => {
+		const session = new WorkerSession({
+			forkId: "fork1",
+			agentId: "agent1",
+			role: "scout",
+			model: createWorkerTestModel(),
+			systemPrompt: "You are a scout.",
+			initialMessage: "Investigate and report.",
+			tools: [],
+			contextLimit: 128000,
+			maxTurns: 1,
+			onFinished: () => {},
+			onError: () => {},
+		});
+
+		const validationError = createAssistantMessage([{ type: "text", text: "bad args" }], "error");
+		validationError.errorMessage = "tool_validation: Invalid field";
+
+		const internals = session as unknown as {
+			stoppedForMaxTurns: boolean;
+			shouldRetryToolValidation(): boolean;
+			agent: { state: { messages: AgentMessage[] } };
+		};
+		internals.agent.state.messages.push(validationError);
+		internals.stoppedForMaxTurns = true;
+
+		expect(internals.shouldRetryToolValidation()).toBe(false);
+	});
+});
+
+describe("worker coordination prompts", () => {
+	it("warns the leader not to broaden bounded worker matrices", () => {
+		expect(LEADER_PROMPT).toContain("exact worker count");
+		expect(LEADER_PROMPT).toContain("spawn only those workers");
+		expect(LEADER_PROMPT).toContain("synthesize the answer instead of broadening");
+	});
+
+	it("does not nudge bounded scout or engineer work into extra worker waves", () => {
+		expect(COORDINATOR_ON_SPAWN.scout).toContain("do not broaden");
+		expect(COORDINATOR_ON_SPAWN.engineer).toContain("do not broaden");
+		expect(COORDINATOR_ON_SPAWN.scout).not.toContain("other areas to investigate");
+		expect(COORDINATOR_ON_SPAWN.engineer).not.toContain("other independent changes");
+	});
+
+	it("tells artisan workers to load saved artifacts as well as save drafts", () => {
+		expect(ARTISAN_PROMPT).toContain("scratchpad_save");
+		expect(ARTISAN_PROMPT).toContain("scratchpad_load");
+	});
+});
+
+describe("scratchpad_save", () => {
+	it("canonicalizes common category aliases before saving", async () => {
+		const rootDir = mkdtempSync(join(tmpdir(), "pi-scratchpad-test-"));
+		try {
+			const scratchpad = new ScratchpadManager({ rootDir });
+			const tool = createScratchpadSaveToolDefinition(scratchpad);
+			const args = tool.prepareArguments?.({
+				title: "Source approval critique",
+				category: "analysis",
+				content: "findings",
+			});
+
+			expect(args).toMatchObject({ category: "reports" });
+			const result = await tool.execute("call-1", args as never, undefined, undefined, undefined as never);
+			expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("to reports:");
+		} finally {
+			rmSync(rootDir, { recursive: true, force: true });
+		}
 	});
 });
 

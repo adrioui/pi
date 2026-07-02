@@ -29,8 +29,14 @@ export interface WorkerExecutorOptions {
 	publishEvent: (type: string, payload: Record<string, unknown>) => Promise<void>;
 	userRules?: PermissionRule[];
 	forkedProjectionStore?: ForkedProjectionStore<RuntimeEvent>;
-	onWorkerFinished: (result: { text: string; forkId: string; agentId: string; role: string }) => void;
-	onWorkerError: (error: { error: string; forkId: string; agentId: string }) => void;
+	onWorkerFinished: (result: {
+		text: string;
+		forkId: string;
+		agentId: string;
+		role: string;
+		stopReason?: string;
+	}) => void;
+	onWorkerError: (error: { error: string; forkId: string; agentId: string; role: string }) => void;
 }
 
 /**
@@ -122,7 +128,7 @@ export class WorkerExecutor {
 		const model = this.options.resolveModel(role);
 		if (!model) {
 			await this.publishTerminalSpawnFailure(forkId, agentId, role, "no_model");
-			this.options.onWorkerError({ error: `No model resolved for role: ${role}`, forkId, agentId });
+			this.options.onWorkerError({ error: `No model resolved for role: ${role}`, forkId, agentId, role });
 			return;
 		}
 
@@ -145,6 +151,7 @@ export class WorkerExecutor {
 				error: `Worker setup failed: ${err instanceof Error ? err.message : String(err)}`,
 				forkId,
 				agentId,
+				role,
 			});
 			return;
 		}
@@ -167,14 +174,26 @@ export class WorkerExecutor {
 					role,
 				}),
 			onFinished: (result) => {
-				if (this.intentionallyKilled.delete(agentId)) return;
+				const killed = this.intentionallyKilled.delete(agentId);
+				void this.options.publishEvent("fork_cleaned", {
+					forkId,
+					agentId,
+					reason: killed ? "killed" : "finished",
+				});
 				this.cleanupWorker(forkId, agentId);
+				if (killed) return;
 				this.options.onWorkerFinished({ ...result, role });
 			},
 			onError: (error) => {
+				const killed = this.intentionallyKilled.delete(agentId);
+				void this.options.publishEvent("fork_cleaned", {
+					forkId,
+					agentId,
+					reason: killed ? "killed" : "error",
+				});
 				this.cleanupWorker(forkId, agentId);
-				if (this.intentionallyKilled.delete(agentId)) return;
-				this.options.onWorkerError(error);
+				if (killed) return;
+				this.options.onWorkerError({ ...error, role });
 			},
 		});
 
@@ -194,12 +213,14 @@ export class WorkerExecutor {
 		}
 
 		void session.start().catch((err) => {
+			void this.options.publishEvent("fork_cleaned", { forkId, agentId, reason: "error" });
 			this.cleanupWorker(forkId, agentId);
 			if (this.intentionallyKilled.delete(agentId)) return;
 			this.options.onWorkerError({
 				error: `Worker session crashed: ${err instanceof Error ? err.message : String(err)}`,
 				forkId,
 				agentId,
+				role,
 			});
 		});
 	}
@@ -257,6 +278,7 @@ export class WorkerExecutor {
 			reason,
 			willRetry: false,
 		});
+		void this.options.publishEvent("fork_cleaned", { forkId, agentId, reason: "error" });
 		this.pendingMessages.delete(agentId);
 	}
 

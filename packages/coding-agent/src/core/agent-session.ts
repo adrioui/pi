@@ -186,6 +186,13 @@ export type AgentSessionEvent =
 			success: boolean;
 			attempt: number;
 			finalError?: string;
+	  }
+	| { type: "skill_activated"; skillName: string; skillPath: string; hasArgs: boolean }
+	| {
+			type: "runtime_event";
+			runtimeEventType: string;
+			payload: Record<string, unknown>;
+			sequence?: number;
 	  };
 
 /** Listener function for agent session events */
@@ -724,6 +731,16 @@ export class AgentSession {
 		}
 	}
 
+	/** Emit a persisted runtime event to UI subscribers without adding it to model/session context. */
+	emitRuntimeEvent(event: { type: string; payload: Record<string, unknown>; sequence?: number }): void {
+		this._emit({
+			type: "runtime_event",
+			runtimeEventType: event.type,
+			payload: event.payload,
+			sequence: event.sequence,
+		});
+	}
+
 	private _emitQueueUpdate(): void {
 		this._emit({
 			type: "queue_update",
@@ -1088,6 +1105,7 @@ export class AgentSession {
 			name: tool.name,
 			description: tool.description,
 			parameters: tool.parameters,
+			prepareArguments: tool.prepareArguments,
 			execute: (id, args, signal, onUpdate) => {
 				const input = args as Record<string, unknown>;
 				const mutatingTools = new Set(["edit", "write", "bash", "edit-diff", "restore_snapshot"]);
@@ -1691,6 +1709,12 @@ export class AgentSession {
 			const content = readFileSync(skill.filePath, "utf-8");
 			const body = stripFrontmatter(content).trim();
 			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
+			this._emit({
+				type: "skill_activated",
+				skillName: skill.name,
+				skillPath: skill.filePath,
+				hasArgs: args.length > 0,
+			});
 			return args ? `${skillBlock}\n\n${args}` : skillBlock;
 		} catch (err) {
 			// Emit error like extension commands do

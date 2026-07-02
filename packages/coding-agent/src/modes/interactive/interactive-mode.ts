@@ -177,6 +177,26 @@ type CompactionQueuedMessage = {
 	mode: "steer" | "followUp";
 };
 
+type RuntimeEventPayload = Record<string, unknown>;
+
+type WorkerTreeNode = {
+	agentId: string;
+	forkId: string;
+	parentForkId?: string;
+	role: string;
+	status: "running" | "done" | "killed" | "error";
+	model?: string;
+	taskId?: string;
+	stopReason?: string;
+};
+
+type ToolTimelineEntry = {
+	toolName: string;
+	status: "queued" | "running" | "succeeded" | "failed";
+	startedAt?: number;
+	endedAt?: number;
+};
+
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 
 function isDeadTerminalError(error: unknown): boolean {
@@ -317,6 +337,10 @@ export class InteractiveMode {
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
+	private runtimeWorkerTree = new Map<string, WorkerTreeNode>();
+	private runtimeWorkerTreeComponent: Text | undefined = undefined;
+	private toolTimelineEntries = new Map<string, ToolTimelineEntry>();
+	private toolTimelineComponent: Text | undefined = undefined;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -2726,6 +2750,185 @@ export class InteractiveMode {
 		});
 	}
 
+	private shortRuntimeId(value: unknown): string | undefined {
+		if (typeof value !== "string" || value.length === 0) return undefined;
+		return value.length > 8 ? value.slice(0, 8) : value;
+	}
+
+	private runtimeModelLabel(model: unknown): string | undefined {
+		if (!model || typeof model !== "object") return undefined;
+		const provider = (model as { provider?: unknown }).provider;
+		const id = (model as { id?: unknown }).id;
+		if (typeof provider === "string" && typeof id === "string") return `${provider}/${id}`;
+		return undefined;
+	}
+
+	private stringPayload(payload: RuntimeEventPayload, key: string): string | undefined {
+		const value = payload[key];
+		return typeof value === "string" && value.length > 0 ? value : undefined;
+	}
+
+	private ensureRuntimeWorker(payload: RuntimeEventPayload): WorkerTreeNode | undefined {
+		const agentId = this.stringPayload(payload, "agentId") ?? this.stringPayload(payload, "workerId");
+		const forkId = this.stringPayload(payload, "forkId") ?? agentId;
+		if (!agentId || !forkId) return undefined;
+
+		const existing = this.runtimeWorkerTree.get(agentId);
+		const role =
+			this.stringPayload(payload, "role") ?? existing?.role ?? this.stringPayload(payload, "name") ?? "worker";
+		const node: WorkerTreeNode = {
+			agentId,
+			forkId,
+			parentForkId: this.stringPayload(payload, "parentForkId") ?? existing?.parentForkId,
+			role,
+			status: existing?.status ?? "running",
+			model: this.runtimeModelLabel(payload.model) ?? existing?.model,
+			taskId: this.stringPayload(payload, "taskId") ?? existing?.taskId,
+			stopReason: this.stringPayload(payload, "stopReason") ?? existing?.stopReason,
+		};
+		this.runtimeWorkerTree.set(agentId, node);
+		return node;
+	}
+
+	private updateRuntimeWorkerTree(eventType: string, payload: RuntimeEventPayload): void {
+		const node = this.ensureRuntimeWorker(payload);
+		if (!node) return;
+		if (eventType === "worker_finished" || (eventType === "agent_finished" && !payload.killed)) {
+			node.status = "done";
+			node.stopReason = this.stringPayload(payload, "stopReason") ?? node.stopReason;
+		} else if (eventType === "worker_killed" || (eventType === "agent_finished" && Boolean(payload.killed))) {
+			node.status = "killed";
+			node.stopReason = this.stringPayload(payload, "stopReason") ?? "killed";
+		} else if (eventType === "worker_error") {
+			node.status = "error";
+		}
+		this.renderRuntimeWorkerTree();
+	}
+
+	private renderRuntimeWorkerTree(): void {
+		if (this.runtimeWorkerTree.size === 0) return;
+		const nodes = [...this.runtimeWorkerTree.values()].filter((node) => node.role !== "leader");
+		if (nodes.length === 0) return;
+		const lines = [theme.bold(theme.fg("accent", "Workers")), "leader"];
+		for (const [index, node] of nodes.entries()) {
+			const branch = index === nodes.length - 1 ? "└─" : "├─";
+			const parts = [node.role, this.shortRuntimeId(node.agentId), node.taskId ? `task:${node.taskId}` : undefined]
+				.filter((part): part is string => part !== undefined)
+				.join(" ");
+			const status = node.stopReason ? `${node.status}:${node.stopReason}` : node.status;
+			lines.push(`${branch} ${parts}  ${status}${node.model ? `  ${node.model}` : ""}`);
+		}
+		const text = theme.fg("dim", lines.join("\n"));
+		if (!this.runtimeWorkerTreeComponent) {
+			this.chatContainer.addChild(new Spacer(1));
+			this.runtimeWorkerTreeComponent = new Text(text, 1, 0);
+			this.chatContainer.addChild(this.runtimeWorkerTreeComponent);
+		} else {
+			this.runtimeWorkerTreeComponent.setText(text);
+		}
+	}
+
+	private formatRuntimeLifecycleLine(eventType: string, payload: RuntimeEventPayload): string | undefined {
+		const agentId = this.shortRuntimeId(
+			this.stringPayload(payload, "agentId") ?? this.stringPayload(payload, "workerId"),
+		);
+		const forkId = this.shortRuntimeId(this.stringPayload(payload, "forkId"));
+		const role = this.stringPayload(payload, "role") ?? this.stringPayload(payload, "name") ?? "worker";
+		const taskId = this.stringPayload(payload, "taskId");
+		const stopReason = this.stringPayload(payload, "stopReason");
+		const model = this.runtimeModelLabel(payload.model);
+		const reason = this.stringPayload(payload, "reason");
+		const message = this.stringPayload(payload, "message");
+
+		switch (eventType) {
+			case "agent_created":
+				if (role === "leader") return undefined;
+				return `Worker ${role} spawned${agentId ? ` ${agentId}` : ""}${taskId ? ` task:${taskId}` : ""}${model ? ` model:${model}` : ""}`;
+			case "fork_created":
+				return `Fork created${forkId ? ` ${forkId}` : ""}${agentId ? ` for ${agentId}` : ""}`;
+			case "fork_cleaned":
+				return `Fork cleaned${forkId ? ` ${forkId}` : ""}${reason ? ` (${reason})` : ""}`;
+			case "worker_finished":
+				return `Worker ${role} finished${agentId ? ` ${agentId}` : ""}${stopReason ? ` (${stopReason})` : ""}`;
+			case "worker_error":
+				return `Worker ${role} errored${agentId ? ` ${agentId}` : ""}${stopReason ? ` (${stopReason})` : ""}`;
+			case "worker_killed":
+				return `Worker killed${agentId ? ` ${agentId}` : ""}${reason ? `: ${reason}` : ""}`;
+			case "worker_messaged":
+				return `Worker messaged${agentId ? ` ${agentId}` : ""}${message ? `: ${message}` : ""}`;
+			case "task.created":
+				return `Task created ${this.stringPayload(payload, "title") ?? this.stringPayload(payload, "taskId") ?? ""}`.trim();
+			case "task.assigned":
+				return `Task assigned ${this.stringPayload(payload, "taskId") ?? ""}${this.stringPayload(payload, "assignee") ? ` → ${this.shortRuntimeId(this.stringPayload(payload, "assignee"))}` : ""}`.trim();
+			case "task.status_changed":
+				return `Task updated ${this.stringPayload(payload, "taskId") ?? ""}${this.stringPayload(payload, "status") ? ` → ${this.stringPayload(payload, "status")}` : ""}`.trim();
+			default:
+				return undefined;
+		}
+	}
+
+	private handleRuntimeEventForUi(eventType: string, payload: RuntimeEventPayload): void {
+		const visibleEventTypes = new Set([
+			"agent_created",
+			"fork_created",
+			"fork_cleaned",
+			"worker_finished",
+			"worker_error",
+			"worker_killed",
+			"worker_messaged",
+			"task.created",
+			"task.assigned",
+			"task.status_changed",
+		]);
+		if (!visibleEventTypes.has(eventType)) return;
+		this.updateRuntimeWorkerTree(eventType, payload);
+		const line = this.formatRuntimeLifecycleLine(eventType, payload);
+		if (line) {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.fg("dim", line), 1, 0));
+		}
+		this.ui.requestRender();
+	}
+
+	private updateToolTimeline(toolCallId: string, toolName: string, status: ToolTimelineEntry["status"]): void {
+		const now = Date.now();
+		const existing = this.toolTimelineEntries.get(toolCallId);
+		const nextStatus = existing && status === "queued" && existing.status !== "queued" ? existing.status : status;
+		this.toolTimelineEntries.set(toolCallId, {
+			toolName,
+			status: nextStatus,
+			startedAt: existing?.startedAt ?? (nextStatus === "running" ? now : undefined),
+			endedAt: nextStatus === "succeeded" || nextStatus === "failed" ? now : existing?.endedAt,
+		});
+		this.renderToolTimeline();
+	}
+
+	private renderToolTimeline(): void {
+		if (this.toolTimelineEntries.size === 0) return;
+		const entries = [...this.toolTimelineEntries.values()];
+		const runningCount = entries.filter((entry) => entry.status === "running").length;
+		const queuedCount = entries.filter((entry) => entry.status === "queued").length;
+		const headerParts = [
+			runningCount > 0 ? `${runningCount} tool${runningCount === 1 ? "" : "s"} running` : undefined,
+			queuedCount > 0 ? `${queuedCount} queued` : undefined,
+		].filter((part): part is string => part !== undefined);
+		const header = headerParts.length > 0 ? headerParts.join(" · ") : "Tools complete";
+		const details = entries
+			.map((entry) => {
+				const duration = entry.startedAt && entry.endedAt ? ` ${(entry.endedAt - entry.startedAt) / 1000}s` : "";
+				return `${entry.toolName}:${entry.status}${duration}`;
+			})
+			.join(" · ");
+		const text = theme.fg("dim", `${header}\n${details}`);
+		if (!this.toolTimelineComponent) {
+			this.chatContainer.addChild(new Spacer(1));
+			this.toolTimelineComponent = new Text(text, 1, 0);
+			this.chatContainer.addChild(this.toolTimelineComponent);
+		} else {
+			this.toolTimelineComponent.setText(text);
+		}
+	}
+
 	private async handleEvent(event: AgentSessionEvent): Promise<void> {
 		if (!this.isInitialized) {
 			await this.init();
@@ -2736,6 +2939,8 @@ export class InteractiveMode {
 		switch (event.type) {
 			case "agent_start":
 				this.pendingTools.clear();
+				this.toolTimelineEntries.clear();
+				this.toolTimelineComponent = undefined;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -2764,6 +2969,10 @@ export class InteractiveMode {
 			case "queue_update":
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
+				break;
+
+			case "runtime_event":
+				this.handleRuntimeEventForUi(event.runtimeEventType, event.payload);
 				break;
 
 			case "session_info_changed":
@@ -2806,6 +3015,7 @@ export class InteractiveMode {
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
+							this.updateToolTimeline(content.id, content.name, "queued");
 							if (!this.pendingTools.has(content.id)) {
 								const component = new ToolExecutionComponent(
 									content.name,
@@ -2892,6 +3102,7 @@ export class InteractiveMode {
 					this.chatContainer.addChild(component);
 					this.pendingTools.set(event.toolCallId, component);
 				}
+				this.updateToolTimeline(event.toolCallId, event.toolName, "running");
 				component.markExecutionStarted();
 				this.ui.requestRender();
 				break;
@@ -2908,6 +3119,7 @@ export class InteractiveMode {
 
 			case "tool_execution_end": {
 				const component = this.pendingTools.get(event.toolCallId);
+				this.updateToolTimeline(event.toolCallId, event.toolName, event.isError ? "failed" : "succeeded");
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
 					this.pendingTools.delete(event.toolCallId);

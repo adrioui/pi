@@ -29,6 +29,10 @@ const EMPTY_USAGE: Usage = {
 
 type RenderSessionContextThis = {
 	pendingTools: Map<string, ToolExecutionComponent>;
+	runtimeWorkerTree: Map<string, unknown>;
+	runtimeWorkerTreeComponent: Text | undefined;
+	toolTimelineEntries: Map<string, unknown>;
+	toolTimelineComponent: Text | undefined;
 	chatContainer: Container;
 	footer: { invalidate(): void };
 	ui: TUI;
@@ -43,6 +47,20 @@ type RenderSessionContextThis = {
 	updateEditorBorderColor(): void;
 	getRegisteredToolDefinition(toolName: string): undefined;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
+	shortRuntimeId(value: unknown): string | undefined;
+	runtimeModelLabel(model: unknown): string | undefined;
+	stringPayload(payload: Record<string, unknown>, key: string): string | undefined;
+	ensureRuntimeWorker(payload: Record<string, unknown>): unknown;
+	updateRuntimeWorkerTree(eventType: string, payload: Record<string, unknown>): void;
+	renderRuntimeWorkerTree(): void;
+	formatRuntimeLifecycleLine(eventType: string, payload: Record<string, unknown>): string | undefined;
+	handleRuntimeEventForUi(eventType: string, payload: Record<string, unknown>): void;
+	updateToolTimeline(
+		toolCallId: string,
+		toolName: string,
+		status: "queued" | "running" | "succeeded" | "failed",
+	): void;
+	renderToolTimeline(): void;
 };
 
 type RenderSessionContext = (
@@ -55,8 +73,25 @@ type HandleEvent = (this: RenderSessionContextThis, event: AgentSessionEvent) =>
 
 function createFakeInteractiveModeThis(): RenderSessionContextThis {
 	const chatContainer = new Container();
+	const prototype = InteractiveMode.prototype as unknown as Pick<
+		RenderSessionContextThis,
+		| "shortRuntimeId"
+		| "runtimeModelLabel"
+		| "stringPayload"
+		| "ensureRuntimeWorker"
+		| "updateRuntimeWorkerTree"
+		| "renderRuntimeWorkerTree"
+		| "formatRuntimeLifecycleLine"
+		| "handleRuntimeEventForUi"
+		| "updateToolTimeline"
+		| "renderToolTimeline"
+	>;
 	return {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
+		runtimeWorkerTree: new Map<string, unknown>(),
+		runtimeWorkerTreeComponent: undefined,
+		toolTimelineEntries: new Map<string, unknown>(),
+		toolTimelineComponent: undefined,
 		chatContainer,
 		footer: { invalidate: vi.fn() },
 		ui: { requestRender: vi.fn() } as unknown as TUI,
@@ -73,6 +108,16 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		addMessageToChat(message: AgentMessage) {
 			chatContainer.addChild(new Text(message.role, 0, 0));
 		},
+		shortRuntimeId: prototype.shortRuntimeId,
+		runtimeModelLabel: prototype.runtimeModelLabel,
+		stringPayload: prototype.stringPayload,
+		ensureRuntimeWorker: prototype.ensureRuntimeWorker,
+		updateRuntimeWorkerTree: prototype.updateRuntimeWorkerTree,
+		renderRuntimeWorkerTree: prototype.renderRuntimeWorkerTree,
+		formatRuntimeLifecycleLine: prototype.formatRuntimeLifecycleLine,
+		handleRuntimeEventForUi: prototype.handleRuntimeEventForUi,
+		updateToolTimeline: prototype.updateToolTimeline,
+		renderToolTimeline: prototype.renderToolTimeline,
 	};
 }
 
@@ -160,5 +205,99 @@ describe("InteractiveMode.renderSessionContext", () => {
 
 		expect(fakeThis.pendingTools.size).toBe(0);
 		expect(renderChat(fakeThis.chatContainer)).toContain("HISTORICAL_RESULT");
+	});
+
+	test("renders runtime worker lifecycle events and updates compact worker tree", async () => {
+		const fakeThis = createFakeInteractiveModeThis();
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+
+		await handleEvent.call(fakeThis, {
+			type: "runtime_event",
+			runtimeEventType: "agent_created",
+			payload: {
+				agentId: "worker-123456789",
+				forkId: "fork-123456789",
+				parentForkId: "leader-1",
+				role: "scout",
+				mode: "spawn",
+				taskId: "task-1",
+				model: { provider: "test", id: "fast" },
+			},
+		});
+
+		await handleEvent.call(fakeThis, {
+			type: "runtime_event",
+			runtimeEventType: "worker_finished",
+			payload: {
+				agentId: "worker-123456789",
+				forkId: "fork-123456789",
+				role: "scout",
+				stopReason: "finished",
+			},
+		});
+
+		const rendered = renderChat(fakeThis.chatContainer);
+		expect(rendered).toContain("Worker scout spawned worker-1 task:task-1 model:test/fast");
+		expect(rendered).toContain("Worker scout finished worker-1 (finished)");
+		expect(rendered).toContain("Workers");
+		expect(rendered).toContain("leader");
+		expect(rendered).toContain("scout worker-1 task:task-1  done:finished  test/fast");
+	});
+
+	test("renders worker error stop reason when present", async () => {
+		const fakeThis = createFakeInteractiveModeThis();
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+
+		await handleEvent.call(fakeThis, {
+			type: "runtime_event",
+			runtimeEventType: "worker_error",
+			payload: {
+				agentId: "worker-error-123",
+				forkId: "fork-error-123",
+				role: "scout",
+				stopReason: "error",
+				error: "rate limited",
+			},
+		});
+
+		const rendered = renderChat(fakeThis.chatContainer);
+		expect(rendered).toContain("Worker scout errored worker-e (error)");
+		expect(rendered).toContain("scout worker-e  error:error");
+	});
+
+	test("renders compact tool timeline status while tools execute", async () => {
+		const fakeThis = createFakeInteractiveModeThis();
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+
+		await handleEvent.call(fakeThis, {
+			type: "tool_execution_start",
+			toolCallId: "tool-a",
+			toolName: "read",
+			args: { path: "a.ts" },
+		});
+		await handleEvent.call(fakeThis, {
+			type: "tool_execution_start",
+			toolCallId: "tool-b",
+			toolName: "bash",
+			args: { command: "echo ok" },
+		});
+
+		let rendered = renderChat(fakeThis.chatContainer);
+		expect(rendered).toContain("2 tools running");
+		expect(rendered).toContain("read:running");
+		expect(rendered).toContain("bash:running");
+
+		await handleEvent.call(fakeThis, {
+			type: "tool_execution_end",
+			toolCallId: "tool-a",
+			toolName: "read",
+			result: { content: [{ type: "text", text: "ok" }], details: undefined },
+			isError: false,
+		});
+
+		rendered = renderChat(fakeThis.chatContainer);
+		expect(rendered).toContain("1 tool running");
+		expect(rendered).toContain("read:succeeded");
+		expect(rendered).toContain("bash:running");
 	});
 });

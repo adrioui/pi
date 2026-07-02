@@ -12,10 +12,31 @@ import type { ScratchpadArtifact, ScratchpadCategory, ScratchpadManager } from "
 
 const SCRATCHPAD_CATEGORIES: ScratchpadCategory[] = ["designs", "plans", "reports", "results", "thoughts", "processes"];
 
+const SCRATCHPAD_CATEGORY_ALIASES: Record<string, ScratchpadCategory> = {
+	analysis: "reports",
+	analyses: "reports",
+	audit: "reports",
+	audits: "reports",
+	critique: "reports",
+	critiques: "reports",
+	design: "designs",
+	plan: "plans",
+	process: "processes",
+	report: "reports",
+	result: "results",
+	summary: "reports",
+	summaries: "reports",
+	thought: "thoughts",
+	verification: "results",
+	verifications: "results",
+};
+
+const SCRATCHPAD_CATEGORY_INPUTS = [...SCRATCHPAD_CATEGORIES, ...Object.keys(SCRATCHPAD_CATEGORY_ALIASES)] as const;
+
 const scratchpadSaveSchema = Type.Object({
 	title: Type.String({ description: "Title for the artifact" }),
 	category: Type.Union(
-		SCRATCHPAD_CATEGORIES.map((c) => Type.Literal(c)),
+		SCRATCHPAD_CATEGORY_INPUTS.map((c) => Type.Literal(c)),
 		{ description: "Category directory for the artifact" },
 	),
 	content: Type.String({ description: "Full artifact content to save" }),
@@ -42,6 +63,7 @@ export function createScratchpadSaveToolDefinition(
 			"Artifacts are organized by category: designs, plans, reports, results, thoughts, processes.",
 		],
 		parameters: scratchpadSaveSchema,
+		prepareArguments: (args: unknown) => normalizeScratchpadSaveArgs(args) as Static<typeof scratchpadSaveSchema>,
 		execute: async (
 			_toolCallId: string,
 			params: Static<typeof scratchpadSaveSchema>,
@@ -75,4 +97,17 @@ export function createScratchpadSaveToolDefinition(
 			}
 		},
 	};
+}
+
+function normalizeScratchpadSaveArgs(args: unknown): unknown {
+	if (!args || typeof args !== "object" || Array.isArray(args)) return args;
+	const normalized = { ...(args as Record<string, unknown>) };
+	if (typeof normalized.category === "string") {
+		const key = normalized.category
+			.trim()
+			.toLowerCase()
+			.replace(/[\s_-]+/g, "_");
+		normalized.category = SCRATCHPAD_CATEGORY_ALIASES[key] ?? normalized.category;
+	}
+	return normalized;
 }

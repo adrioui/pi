@@ -135,45 +135,6 @@ export function createMemoryExtractionWorker<TEvent extends RuntimeEvent = Runti
 	};
 }
 
-export function createGoalWorker<TEvent extends RuntimeEvent = RuntimeEvent>(): RoleDefinition<TEvent> {
-	return {
-		name: "GoalProjectionWorker",
-		match: (event, projections) => {
-			if (event.type !== "turn_outcome") {
-				return false;
-			}
-			const goal = projections.get<{ status?: string }>("Goal");
-			if (goal?.status !== "started") {
-				return false;
-			}
-			return (
-				event.payload.goalStatus === "finished" ||
-				event.payload.goalStatus === "incomplete" ||
-				event.payload.result === "finished" ||
-				event.payload.result === "completed" ||
-				event.payload.result === "success" ||
-				event.payload.result === "incomplete" ||
-				event.payload.result === "failed" ||
-				event.payload.result === "error"
-			);
-		},
-		run: async ({ event, publish }) => {
-			const status =
-				event.payload.goalStatus === "incomplete" ||
-				event.payload.result === "incomplete" ||
-				event.payload.result === "failed" ||
-				event.payload.result === "error"
-					? "incomplete"
-					: "finished";
-			await publish(
-				createEvent(event, status === "finished" ? "goal.finished" : "goal.incomplete", {
-					turnId: event.payload.turnId,
-				}) as TEvent,
-			);
-		},
-	};
-}
-
 export function createDisplayWorker<TEvent extends RuntimeEvent = RuntimeEvent>(): RoleDefinition<TEvent> {
 	return {
 		name: "DisplayProjectionWorker",
@@ -200,7 +161,6 @@ export function createBuiltinWorkers<TEvent extends RuntimeEvent = RuntimeEvent>
 		createProcessMetricsWorker<TEvent>(),
 		createShellProcessWorker<TEvent>(),
 		createMemoryExtractionWorker<TEvent>(),
-		createGoalWorker<TEvent>(),
 		createDisplayWorker<TEvent>(),
 	];
 }

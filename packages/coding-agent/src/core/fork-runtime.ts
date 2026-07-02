@@ -2,8 +2,7 @@
  * Fork-Worker Runtime Adapter - Phase 0.
  *
  * Runtime adapter that publishes agent_created, agent_finished, task, and goal
- * events via the SessionOrchestrator's publishRuntimeEvent. This replaces
- * the shared throw-stub in role-control-tool.ts with actual event publishing.
+ * events via the SessionOrchestrator's publishRuntimeEvent.
  *
  * Mirrors Magnitude's fork-worker runtime: each role tool call publishes
  * the appropriate event-core event, which projections and roles react to.
@@ -90,6 +89,8 @@ export class ForkRuntime {
 	private readonly getSequence: () => number;
 	private readonly resolveModel?: (role: string) => { provider: string; id: string } | undefined;
 	private readonly workerForkIds = new Map<string, string>();
+	/** taskId → agentId currently assigned, so reassign can kill the prior worker. */
+	private readonly taskAssignees = new Map<string, string>();
 
 	constructor(options: ForkRuntimeOptions) {
 		this.sessionId = options.sessionId;
@@ -122,6 +123,15 @@ export class ForkRuntime {
 			model: model ? { provider: model.provider, id: model.id } : undefined,
 		});
 		this.workerForkIds.set(agentId, forkId);
+		if (input.taskId) {
+			this.taskAssignees.set(input.taskId, agentId);
+		}
+		await this.publish("fork_created", {
+			forkId,
+			parentForkId: this.sessionId,
+			agentId,
+			role: input.role,
+		});
 		return { forkId, agentId };
 	}
 
@@ -150,6 +160,11 @@ export class ForkRuntime {
 			stopReason: "killed",
 			reason: input.reason ?? "killed by leader",
 		});
+		await this.publish("worker_killed", {
+			agentId: input.workerId,
+			forkId,
+			reason: input.reason ?? "killed by leader",
+		});
 	}
 
 	/**
@@ -164,6 +179,9 @@ export class ForkRuntime {
 			parentId: input.parentId ?? null,
 			assignee: input.assignee ?? null,
 		});
+		if (input.assignee) {
+			this.taskAssignees.set(taskId, input.assignee);
+		}
 		return { taskId };
 	}
 
@@ -213,6 +231,26 @@ export class ForkRuntime {
 	 * Reassign a task to a different worker. Publishes a `task.assigned` event.
 	 */
 	async reassignWorker(input: ReassignWorkerInput): Promise<void> {
+		// Kill the previously assigned worker (if any) so reassigning doesn't leave
+		// two workers running the same task.
+		const oldWorkerId = this.taskAssignees.get(input.taskId);
+		if (oldWorkerId && oldWorkerId !== input.workerId) {
+			const oldForkId = this.workerForkIds.get(oldWorkerId) ?? oldWorkerId;
+			await this.publish("agent_finished", {
+				agentId: oldWorkerId,
+				forkId: oldForkId,
+				willRetry: false,
+				killed: true,
+				stopReason: "killed",
+				reason: "reassigned to new worker",
+			});
+			await this.publish("worker_killed", {
+				agentId: oldWorkerId,
+				forkId: oldForkId,
+				reason: "reassigned to new worker",
+			});
+		}
+		this.taskAssignees.set(input.taskId, input.workerId);
 		await this.publish("task.assigned", {
 			taskId: input.taskId,
 			assignee: input.workerId,

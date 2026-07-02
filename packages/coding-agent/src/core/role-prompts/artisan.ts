@@ -20,7 +20,7 @@ export const ARTISAN_PROMPT = [
 	"Start with a working version, then iterate on quality. Do not over-plan; build and refine.",
 	"Review your own output critically before reporting completion.",
 	"Test edge cases: empty states, long text, small screens, error conditions.",
-	"Use scratchpad_save to persist drafts for iterative refinement.",
+	"Use scratchpad_save to persist drafts for iterative refinement. Use scratchpad_load when the coordinator names prior artifacts or when continuing saved design work.",
 	"",
 	"## Failure modes to avoid",
 	"Under-refinement: Do not ship rough work. Iterate until the output meets a high bar.",
